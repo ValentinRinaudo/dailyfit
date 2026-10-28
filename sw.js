@@ -1,5 +1,5 @@
 /* Daily Fit service worker: app shell offline, fonts cached on first use, weather always live. */
-const VERSION = "dailyfit-v5.0.0";
+const VERSION = "dailyfit-v5.1.0";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "ai.js", "data.js", "manifest.webmanifest",
   "icon-192.png", "icon-512.png", "maskable-512.png"];
 

@@ -270,3 +270,14 @@ button.rowi:last-child{border-bottom:0}
 .avatar.lg .icon{width:32px;height:32px}
 .linkbtn{white-space:nowrap}
 .wrap{padding-bottom:calc(92px + env(safe-area-inset-bottom,0px))}
+
+/* ratings */
+.pred{font-family:var(--f-mono);font-size:11px;color:var(--accent);background:var(--accent-soft);padding:2px 8px;border-radius:999px}
+.ratecard{background:var(--surface);border-radius:var(--r);padding:14px 16px;display:grid;gap:12px;box-shadow:var(--shadow);border:1.5px solid var(--accent)}
+.ratecard .linkbtn{display:inline-flex;align-items:center;gap:6px}
+.ratecard .linkbtn .icon{width:18px;height:18px}
+.stars.big{justify-content:space-between;max-width:320px}
+.stars.big button{font-size:38px;min-width:48px;min-height:52px}
+.stars button.hot{color:color-mix(in srgb,var(--accent) 55%,var(--line2))}
+.wornrow{border:0;background:var(--surface);border-radius:var(--r);padding:12px 14px;display:grid;gap:8px;text-align:left;box-shadow:var(--shadow);width:100%}
+.wornrow .k{font-weight:650;font-size:14px}

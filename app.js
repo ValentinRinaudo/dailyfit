@@ -574,6 +574,7 @@ function renderToday(v){
     <div class="wx-note"><span>${esc(p.note)}${p.swing?" "+esc(p.swing):""}</span>
       ${S.loc&&fc?`<button type="button" class="linkbtn" id="manualOn">Set it myself</button>`:st.manual?`<button type="button" class="linkbtn" id="manualOff">Use forecast</button>`:!S.loc?`<button type="button" class="linkbtn" id="setLoc">Set location</button>`:""}</div>
   </section>
+  ${pendingRating()?rateCardHTML(pendingRating()):""}
   ${S.items.length?`<div class="stack tight">${seg("vibe",[["","Any"],...D.vibes.map(x=>[x.id,x.name])],S.vibe||"","scroll vibes")}${V?`<p class="vibetip">${esc(V.tip)}</p>`:""}</div>`:""}
   <div id="fits"></div>
   ${S.items.length?`<div class="actions">
@@ -597,6 +598,7 @@ function renderToday(v){
     if (S.lookIdx>0) requestAnimationFrame(()=>{ const w=strip.firstElementChild.getBoundingClientRect().width+12; strip.scrollLeft=S.lookIdx*w; });
     bindLooks(fits,c);
   }
+  const rc=v.querySelector(".ratecard"); if (rc) bindRateCard(rc, pendingRating());
   const on=(id,fn)=>{ const el=$(id); if (el) el.onclick=fn; };
   const ti=$("#tempIn"); if (ti){ ti.oninput=e=>{ st.manualTemp=+e.target.value; $("#tempOut").textContent=deg(st.manualTemp); }; ti.onchange=()=>{ S.skipped.clear(); saveSettings(); render(); }; }
   on("#rainBtn",()=>{ st.manualRain=!st.manualRain; saveSettings(); render(); });
@@ -628,7 +630,7 @@ function lookHTML(o,i){
   const isSaved=S.saved.some(f=>f.key===o.key);
   const top=o.tags.slice(0,3), rest=o.tags.slice(3);
   return `<article class="look" aria-label="Fit ${i+1}">
-    <div class="look-head"><span class="look-num">Fit ${String(i+1).padStart(2,"0")}</span>
+    <div class="look-head"><span class="row" style="gap:10px"><span class="look-num">Fit ${String(i+1).padStart(2,"0")}</span><span class="pred" title="The app's guess at how you'd rate it">${predictStars(o.score).toFixed(1)} ★ predicted</span></span>
       <button type="button" class="savebtn" data-save="${i}" aria-label="${isSaved?"Saved":"Save fit"}" aria-pressed="${isSaved}">${IC.heart}</button></div>
     ${collageHTML(o,i)}
     ${top.length?`<div class="chips">${top.map(t=>`<span class="chip ${t.c}">${esc(t.t)}</span>`).join("")}</div>`:""}
@@ -666,10 +668,68 @@ function feedback(o,delta){ const ps=partsOf(o);
 async function wear(i, list=S.outfits){
   const o=list[i]; if(!o) return; buzz(); feedback(o,1); learn(o.f,1,1);
   const ps=partsOf(o), now=Date.now(), c=conditions();
-  const entry={t:now, ids:ps.map(x=>x.id), temp:c.temp, vibe:S.vibe||null}; S.history.wear.push(entry);
+  const entry={t:now, ids:ps.map(x=>x.id), temp:c.temp, vibe:S.vibe||null, f:o.f, score:o.score, rating:null, tags:[]}; S.history.wear.push(entry);
   ps.forEach(x=>{ x.wearCount=(x.wearCount||0)+1; x.lastWorn=now; });
   try{ await saveHistory(); await itemsPut(ps); }catch{ storageFail(); }
-  toast(`Logged. Snap a mirror pic to rate it?`, {label:"Mirror pic", fn:()=>startDiary(entry)});
+  if (S.tab==="today") render();
+  toast("Logged. Rate it on Today whenever you like.", {label:"Rate now", fn:()=>rateSheet(entry)});
+}
+/* ================= RATINGS ================= */
+const RATE_TAGS=["Felt sharp","Comfy","Got compliments","Too warm","Too cold","Not me"];
+const rawStars = sc => Math.max(1, Math.min(5, 1 + (sc-3)/2));
+function predOffset(){ const r=S.history.wear.filter(w=>w.rating&&w.score!=null); if (r.length<3) return 0;
+  return r.reduce((a,w)=>a+(w.rating-rawStars(w.score)),0)/r.length; }
+function predictStars(sc){ return Math.max(1,Math.min(5,Math.round((rawStars(sc)+predOffset())*2)/2)); }
+function starsText(n){ const f=Math.floor(n), h=n-f>=.5; return "★".repeat(f)+(h?"½":""); }
+function allRatings(){ return [...S.history.wear.filter(w=>w.rating).map(w=>w.rating), ...S.diary.filter(e=>e.rating&&!e.wearT).map(e=>e.rating)]; }
+function avgRating(){ const r=allRatings(); return r.length?(r.reduce((a,b)=>a+b,0)/r.length):null; }
+async function rateWear(entry, rating, tags=entry.tags||[]){
+  const first=!entry.rated; entry.rating=rating; entry.tags=[...tags];
+  if (first){
+    let f=entry.f; if (!f){ const o=outfitFromIds(entry.ids); if (o.top&&o.bottom) f=scoreOutfit(o).f; }
+    if (rating>=4) learn(f,1,1.5); else if (rating<=2) learn(f,0,2.5);
+    const ps=entry.ids.map(id=>S.items.find(i=>i.id===id)).filter(Boolean), d=rating>=4?1:rating<=2?-1.5:0;
+    if (d) for (let i=0;i<ps.length;i++) for (let j=i+1;j<ps.length;j++){ const k=pairKey(ps[i].id,ps[j].id); S.history.pairs[k]=Math.max(-6,Math.min(6,(S.history.pairs[k]||0)+d)); }
+    if (tags.includes("Too cold")) S.settings.thermal=Math.min(5,(S.settings.thermal||0)+1);
+    if (tags.includes("Too warm")) S.settings.thermal=Math.max(-5,(S.settings.thermal||0)-1);
+    saveSettings(); entry.rated=true;
+  }
+  await saveHistory(); S.skipped.clear(); buzz();
+}
+function pendingRating(){ const cut=Date.now()-36*36e5; return [...S.history.wear].reverse().find(w=>w.t>=cut&&!w.rating&&!w.dismissed)||null; }
+function miniFitHTML(ids){ return `<div class="mini">${ids.map(id=>S.items.find(i=>i.id===id)).filter(Boolean).map(it=>`<div title="${esc(it.name)}">${phHTML(it)}</div>`).join("")}</div>`; }
+function rateCardHTML(w){
+  return `<section class="ratecard" aria-label="Rate your fit">
+    <div class="row between"><div><span class="label">${new Date(w.t).toDateString()===new Date().toDateString()?"Today's fit":"Yesterday's fit"}</span><h3>How did it feel?</h3></div>
+      <button type="button" class="linkbtn muted" id="rLater">Later</button></div>
+    ${miniFitHTML(w.ids)}
+    <div class="stars big" role="group" aria-label="Your rating">${[1,2,3,4,5].map(n=>`<button type="button" data-rstar="${n}" aria-label="${n} star${n>1?"s":""}">★</button>`).join("")}</div>
+    <div class="seg">${RATE_TAGS.map(t=>`<button type="button" data-rtag="${esc(t)}" aria-pressed="false">${esc(t)}</button>`).join("")}</div>
+    <button type="button" class="linkbtn" id="rMirror" style="justify-self:start">${IC.mirror} Add a mirror pic</button>
+  </section>`;
+}
+function bindRateCard(root, w){
+  const tags=[];
+  root.querySelectorAll("[data-rtag]").forEach(b=>b.onclick=()=>{ const t=b.dataset.rtag,i=tags.indexOf(t); if (i>=0) tags.splice(i,1); else tags.push(t); b.setAttribute("aria-pressed",String(i<0)); });
+  root.querySelectorAll("[data-rstar]").forEach(b=>{
+    b.onpointerenter=()=>root.querySelectorAll("[data-rstar]").forEach(x=>x.classList.toggle("hot",+x.dataset.rstar<=+b.dataset.rstar));
+    b.onclick=async()=>{ const n=+b.dataset.rstar; root.querySelectorAll("[data-rstar]").forEach(x=>x.setAttribute("aria-pressed",String(+x.dataset.rstar<=n)));
+      await rateWear(w,n,tags); toast(n>=4?"Noted. More fits like this.":n<=2?"Noted. Fewer fits like this.":"Noted."); setTimeout(()=>render(),350); };
+  });
+  const l=root.querySelector("#rLater"); if (l) l.onclick=async()=>{ w.dismissed=true; await saveHistory(); render(); };
+  const m=root.querySelector("#rMirror"); if (m) m.onclick=()=>startDiary(w);
+}
+function rateSheet(w){
+  let n=w.rating||0; const tags=[...(w.tags||[])];
+  const p=openSheet(`<div class="row between"><div><span class="label">${fmtDay(w.t)}${w.temp!=null?" · "+deg(w.temp):""}</span><h2>Rate this fit</h2></div><button type="button" class="btn quiet" id="x">Close</button></div>
+    ${miniFitHTML(w.ids)}
+    <div class="stars big" role="group" aria-label="Your rating">${[1,2,3,4,5].map(k=>`<button type="button" data-rs="${k}" aria-pressed="${k<=n}" aria-label="${k} star${k>1?"s":""}">★</button>`).join("")}</div>
+    <div class="seg">${RATE_TAGS.map(t=>`<button type="button" data-rt="${esc(t)}" aria-pressed="${tags.includes(t)}">${esc(t)}</button>`).join("")}</div>
+    <button type="button" class="btn accent block" id="rsSave">Save rating</button>`);
+  p.querySelector("#x").onclick=closeSheet;
+  p.querySelectorAll("[data-rs]").forEach(b=>b.onclick=()=>{ n=+b.dataset.rs; p.querySelectorAll("[data-rs]").forEach(x=>x.setAttribute("aria-pressed",String(+x.dataset.rs<=n))); buzz(); });
+  p.querySelectorAll("[data-rt]").forEach(b=>b.onclick=()=>{ const t=b.dataset.rt,i=tags.indexOf(t); if (i>=0) tags.splice(i,1); else tags.push(t); b.setAttribute("aria-pressed",String(i<0)); });
+  p.querySelector("#rsSave").onclick=async()=>{ if (!n){ toast("Pick 1 to 5 stars first."); return; } await rateWear(w,n,tags); closeSheet(); render(); toast("Rating saved."); };
 }
 function skip(i){ const o=S.outfits[i]; if(!o) return; feedback(o,-.5); learn(o.f,0,.6); S.skipped.add(o.key); saveHistory(); render(); }
 async function saveFit(i){ const o=S.outfits[i]; if (!o) return; const ex=S.saved.findIndex(f=>f.key===o.key);
@@ -737,7 +797,7 @@ diaryIn.onchange=async()=>{
     const img=await loadImage(f), photo=await resize(img,1200,.84), thumb=await resize(img,420,.78);
     const today=new Date().toDateString();
     const lastWear=(diaryCtx&&diaryCtx.wearEntry) || [...S.history.wear].reverse().find(w=>new Date(w.t).toDateString()===today);
-    const e={id:"d"+Date.now().toString(36), t:Date.now(), rating:0, tags:[], note:"", itemIds:lastWear?[...lastWear.ids]:[], photo, thumb, vibe:lastWear?lastWear.vibe:S.vibe};
+    const e={id:"d"+Date.now().toString(36), t:Date.now(), rating:lastWear&&lastWear.rating||0, tags:lastWear&&lastWear.tags?[...lastWear.tags]:[], note:"", itemIds:lastWear?[...lastWear.ids]:[], photo, thumb, vibe:lastWear?lastWear.vibe:S.vibe, wearT:lastWear?lastWear.t:null};
     let aiPicked=false;
     if (aiReady()){
       busySheet("Recognising your pieces…");
@@ -776,6 +836,11 @@ function diaryEditor(e, isNew, aiPicked=false){
   panel.querySelector("#dSave").onclick=async()=>{
     if (!e.rating){ toast("Give it a star rating first."); return; }
     try{
+      const linked=e.wearT&&S.history.wear.find(x=>x.t===e.wearT);
+      if (linked&&linked.rated&&!e.learned){ const prev=linked.tags||[];
+        if (e.tags.includes("Too cold")&&!prev.includes("Too cold")) S.settings.thermal=Math.min(5,(S.settings.thermal||0)+1);
+        if (e.tags.includes("Too warm")&&!prev.includes("Too warm")) S.settings.thermal=Math.max(-5,(S.settings.thermal||0)-1);
+        saveSettings(); e.learned=true; }
       if (!e.learned){
         const o=outfitFromIds(e.itemIds);
         if (o.top&&o.bottom){ const sc=scoreOutfit(o); if (e.rating>=4) learn(sc.f,1,2); else if (e.rating<=2) learn(sc.f,0,2);
@@ -785,6 +850,7 @@ function diaryEditor(e, isNew, aiPicked=false){
         if (e.tags.includes("Too warm")) S.settings.thermal=Math.max(-5,(S.settings.thermal||0)-1);
         saveSettings(); e.learned=true;
       }
+      if (e.wearT){ const w=S.history.wear.find(x=>x.t===e.wearT); if (w){ if (!w.rated){ w.rated=true; } w.rating=e.rating; w.tags=[...new Set([...(w.tags||[]),...e.tags])]; saveHistory(); } }
       await diaryPut(e); const ix=S.diary.findIndex(x=>x.id===e.id); if (ix>=0) S.diary[ix]=e; else S.diary.unshift(e);
       recomputeStyle(); done(); S.skipped.clear(); render(); toast(isNew?"Saved to your diary. The app learned from it.":"Saved.");
     }catch{ toast("Couldn't save. Try again."); }
@@ -832,13 +898,17 @@ function renderDiary(body){
   body.querySelectorAll("[data-de]").forEach(b=>b.onclick=()=>diaryEditor(S.diary.find(e=>e.id===b.dataset.de),false));
 }
 function renderWorn(body){
-  const days=new Map();
-  for (const w of S.history.wear.slice().reverse()){ const d=new Date(w.t).toDateString(); if (!days.has(d)) days.set(d,[]); days.get(d).push(w); }
-  if (!days.size){ body.innerHTML=`<p class="muted">Fits you mark as "Wearing this" show up here.</p>`; return; }
+  const list=[...S.history.wear].reverse();
+  if (!list.length){ body.innerHTML=`<p class="muted">Fits you mark as "Wear this" show up here, with your ratings.</p>`; return; }
+  const avg=avgRating(), ratedN=S.history.wear.filter(w=>w.rating).length;
   const least=S.items.filter(i=>!i.inWash&&i.cat!=="jewelry").sort((a,b)=>(a.lastWorn||0)-(b.lastWorn||0)).slice(0,6);
-  body.innerHTML=`${least.length>=3?`<div class="card"><span class="label">Waiting the longest</span><div class="mini">${least.map(it=>`<div title="${esc(it.name)}">${phHTML(it)}</div>`).join("")}</div></div>`:""}
-    ${[...days.entries()].slice(0,40).map(([d,ws])=>`<div class="day"><div class="row between"><h3>${fmtDay(ws[0].t)}</h3><span class="label">${ws[0].temp!=null?deg(ws[0].temp):""}${ws[0].vibe?" · "+esc((D.vibes.find(x=>x.id===ws[0].vibe)||{}).name||""):""}</span></div>
-      ${ws.map(w=>`<div class="mini">${w.ids.map(id=>S.items.find(i=>i.id===id)).filter(Boolean).map(it=>`<div title="${esc(it.name)}">${phHTML(it)}</div>`).join("")}</div>`).join("")}</div>`).join("")}`;
+  body.innerHTML=`<div class="stats"><div class="stat"><b>${S.history.wear.length}</b><span>fits worn</span></div><div class="stat"><b>${ratedN}</b><span>rated</span></div><div class="stat"><b>${avg?avg.toFixed(1):"–"}</b><span>avg rating</span></div></div>
+    ${least.length>=3?`<div class="card flat"><span class="label">Waiting the longest</span><div class="mini">${least.map(it=>`<div title="${esc(it.name)}">${phHTML(it)}</div>`).join("")}</div></div>`:""}
+    ${list.slice(0,60).map((w,n)=>`<button type="button" class="wornrow" data-wr="${S.history.wear.length-1-n}">
+      <div class="row between"><span class="k">${fmtDay(w.t)}<span class="muted small"> · ${w.temp!=null?deg(w.temp):""}${w.vibe?" · "+esc((D.vibes.find(x=>x.id===w.vibe)||{}).name||""):""}</span></span>
+        <span class="${w.rating?"stars-sm":"muted small"}">${w.rating?"★".repeat(w.rating):"Rate"}</span></div>
+      ${miniFitHTML(w.ids)}${w.tags&&w.tags.length?`<span class="small muted">${esc(w.tags.join(" · "))}</span>`:""}</button>`).join("")}`;
+  body.querySelectorAll("[data-wr]").forEach(b=>b.onclick=()=>rateSheet(S.history.wear[+b.dataset.wr]));
 }
 function renderSaved(body){
   const fits=S.saved.map(f=>({f, parts:Object.entries(f.slots).map(([k,id])=>[k,S.items.find(i=>i.id===id)]).filter(x=>x[1])})).filter(x=>x.parts.length);
@@ -1052,7 +1122,10 @@ function renderYou(v){
   const st=S.settings, pr=S.profile, hrs=[...Array(24).keys()];
   const aiState=AI?AI.state:"off";
   const learned=Object.entries(S.taste.w).filter(([,w])=>Math.abs(w)>.25).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,8);
-  const worn=S.history.wear.length, rated=S.diary.filter(e=>e.rating), avg=rated.length?(rated.reduce((a,e)=>a+e.rating,0)/rated.length).toFixed(1):"–";
+  const worn=S.history.wear.length, avgR=avgRating(), avg=avgR?avgR.toFixed(1):"–";
+  const best=S.history.wear.filter(w=>w.rating>=4).sort((a,b)=>b.rating-a.rating||b.t-a.t).slice(0,3);
+  const pieceR={}; for (const w of S.history.wear.filter(w=>w.rating)) for (const id of w.ids){ (pieceR[id]=pieceR[id]||[]).push(w.rating); }
+  const loved=Object.entries(pieceR).filter(([,r])=>r.length>=2).map(([id,r])=>({it:S.items.find(i=>i.id===id),a:r.reduce((x,y)=>x+y,0)/r.length,n:r.length})).filter(x=>x.it).sort((a,b)=>b.a-a.a).slice(0,6);
   const habit=(key,opts)=>seg("m-"+key,opts,st[key]);
   const jp=JEWEL_PREF.find(([k])=>k===pr.jewelry)?pr.jewelry:(/gold/i.test(pr.jewelry||"")?"Mostly gold":/none|no /i.test(pr.jewelry||"")?"None":"Mostly silver");
   v.innerHTML=`<div class="stack">
@@ -1062,10 +1135,15 @@ function renderYou(v){
         <div class="muted small">${esc([pr.height,pr.weight,pr.hair].filter(Boolean).join(" · "))}</div></div></div>
       <div class="stats"><div class="stat"><b>${S.items.length}</b><span>pieces</span></div><div class="stat"><b>${worn}</b><span>fits worn</span></div><div class="stat"><b>${avg}</b><span>avg rating</span></div></div>
       <div class="stack tight"><span class="label">Style DNA</span>
-        ${learned.length&&S.taste.n>=5?`<div class="chips">${learned.map(([k,w])=>`<span class="chip ${w>0?"trend":"warn"}">${w>0?"":"no "}${esc(featText(k))}</span>`).join("")}</div>`
+        ${learned.length&&S.taste.n>=5?`<div class="chips">${learned.map(([k,w])=>`<span class="chip ${w>0?"trend":"warn"}">${w>0?"":"avoids "}${esc(featText(k))}</span>`).join("")}</div>`
           :`<p class="muted small">Builds itself as you wear, skip and rate fits.</p>`}
         ${S.taste.n?`<button type="button" class="linkbtn" id="resetTaste" style="justify-self:start">Reset Style DNA</button>`:""}</div>
     </section>
+
+    ${best.length||loved.length?`<section><div class="group-title label">Your ratings</div><div class="card">
+      ${best.length?`<span class="label">Best-rated fits</span>${best.map(w=>`<div class="stack tight" style="gap:6px"><span class="small"><span class="stars-sm">${"★".repeat(w.rating)}</span> <span class="muted">${fmtDay(w.t)}</span></span>${miniFitHTML(w.ids)}</div>`).join("")}`:""}
+      ${loved.length?`<span class="label" style="margin-top:6px">Most loved pieces</span><div class="mini">${loved.map(x=>`<div title="${esc(x.it.name)}: ${x.a.toFixed(1)}★ over ${x.n} fits">${phHTML(x.it)}<span class="small muted">${x.a.toFixed(1)}★</span></div>`).join("")}</div>`:""}
+    </div></section>`:""}
 
     <section><div class="group-title label">About you</div><div class="group">
       <div class="rowi"><span class="k">Height</span><input type="text" id="pH" value="${esc(pr.height)}" aria-label="Height"></div>
