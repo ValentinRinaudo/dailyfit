@@ -577,11 +577,11 @@ function renderToday(v){
   ${pendingRating()?rateCardHTML(pendingRating()):""}
   ${S.items.length?`<div class="stack tight">${seg("vibe",[["","Any"],...D.vibes.map(x=>[x.id,x.name])],S.vibe||"","scroll vibes")}${V?`<p class="vibetip">${esc(V.tip)}</p>`:""}</div>`:""}
   <div id="fits"></div>
-  ${S.items.length?`<div class="actions">
-    <button type="button" class="action" id="shuffle">${IC.shuffle}New fits</button>
-    <button type="button" class="action" id="recreateBtn">${IC.spark}Recreate a look</button>
-    <button type="button" class="action" id="mirrorBtn">${IC.mirror}Mirror pic</button></div>
-    ${lockCount?`<div class="row between"><span class="muted small">${lockCount} piece${lockCount>1?"s":""} locked in</span><button type="button" class="linkbtn" id="unlock">Unlock all</button></div>`:""}`:""}
+  <section class="feature-row" aria-label="Looks">
+    <button type="button" class="feature" id="recreateBtn"><span class="ficon">${IC.spark}</span><span><strong>Recreate an inspo fit</strong><span class="h">Upload a photo you like. It's rebuilt from your own clothes.</span></span></button>
+    <button type="button" class="feature" id="mirrorBtn"><span class="ficon">${IC.mirror}</span><span><strong>Mirror pic</strong><span class="h">Photo of you in today's fit. Rate it and the app learns.</span></span></button>
+  </section>
+  ${S.items.length?`<div class="row between"><button type="button" class="linkbtn" id="shuffle">${IC.shuffle} Show three new fits</button>${lockCount?`<button type="button" class="linkbtn" id="unlock">Unlock ${lockCount} piece${lockCount>1?"s":""}</button>`:""}</div>`:""}
   </div>`;
   const fits=$("#fits");
   if (!S.items.length) fits.innerHTML=needsHTML();
@@ -739,8 +739,8 @@ async function saveFit(i){ const o=S.outfits[i]; if (!o) return; const ex=S.save
 /* ================= RECREATE A LOOK ================= */
 const inspoIn=document.createElement("input"); inspoIn.type="file"; inspoIn.accept="image/*"; inspoIn.hidden=true; inspoIn.id="inspoIn"; document.body.appendChild(inspoIn);
 function startRecreate(){
-  if (!aiReady()){ aiNeededSheet("Recreating a look reads the photo with the on-device AI."); return; }
-  if (S.items.filter(i=>i.emb).length<3){ toast("Add a few photographed pieces first, so there's something to match."); return; }
+  if (!aiReady()){ aiNeededSheet("Recreating an inspo fit reads the photo with the on-device fashion AI, then rebuilds it from your clothes."); return; }
+  if (S.items.filter(i=>i.emb).length<3){ toast("Add at least 3 photographed pieces (top, bottom, shoes) first, so there's something to rebuild it from."); return; }
   inspoIn.value=""; inspoIn.click();
 }
 inspoIn.onchange=async()=>{
@@ -776,7 +776,7 @@ inspoIn.onchange=async()=>{
     const done=()=>{ URL.revokeObjectURL(url); closeSheet(); };
     panel.querySelector("#x").onclick=done;
     panel.querySelector("#rWear").onclick=async()=>{ done(); await wear(0,[r]); };
-    panel.querySelector("#rSave").onclick=async()=>{ S.saved.unshift({key:r.key,t:Date.now(),slots:Object.fromEntries(SLOTS.filter(k=>r[k]).map(k=>[k,r[k].id])),inspo:true}); await kvSet("saved",S.saved); toast("Saved under Closet › Saved."); };
+    panel.querySelector("#rSave").onclick=async()=>{ const inspoThumb=await resize(img,420,.8); S.saved.unshift({key:r.key,t:Date.now(),slots:Object.fromEntries(SLOTS.filter(k=>r[k]).map(k=>[k,r[k].id])),inspo:true,inspoThumb}); await kvSet("saved",S.saved); toast("Saved with your inspo photo under Closet › Saved."); };
     panel.querySelector("#rToday").onclick=()=>{ done(); S.locks=Object.fromEntries(["outer","layer","top","bottom","shoes","hat"].filter(k=>r[k]).map(k=>[k,r[k].id])); S.skipped.clear(); setTab("today"); toast("Locked in as your base. Unlock pieces to vary it."); };
   }catch(e){ closeSheet(); toast("Couldn't read that photo. Try a clear full-body shot."); }
 };
@@ -910,12 +910,14 @@ function renderWorn(body){
       ${miniFitHTML(w.ids)}${w.tags&&w.tags.length?`<span class="small muted">${esc(w.tags.join(" · "))}</span>`:""}</button>`).join("")}`;
   body.querySelectorAll("[data-wr]").forEach(b=>b.onclick=()=>rateSheet(S.history.wear[+b.dataset.wr]));
 }
+const inspoURLs=new Map();
+function inspoURL(f){ let u=inspoURLs.get(f.key+f.t); if (!u){ u=URL.createObjectURL(f.inspoThumb); inspoURLs.set(f.key+f.t,u); } return u; }
 function renderSaved(body){
   const fits=S.saved.map(f=>({f, parts:Object.entries(f.slots).map(([k,id])=>[k,S.items.find(i=>i.id===id)]).filter(x=>x[1])})).filter(x=>x.parts.length);
   if (!fits.length){ body.innerHTML=`<p class="muted">Tap ☆ on a fit, or save a recreated look, to keep it here.</p>`; return; }
   body.innerHTML=fits.map(({f,parts},n)=>`<div class="card"><div class="row between"><span class="label">${f.inspo?"From inspiration · ":""}Saved ${fmtDay(f.t)}</span>
     <div class="row"><button type="button" class="btn quiet" data-unsave="${n}">Remove</button><button type="button" class="btn accent" data-wearsaved="${n}">Wear today</button></div></div>
-    <div class="mini">${parts.map(([k,it])=>`<div title="${esc(it.name)}">${phHTML(it)}</div>`).join("")}</div></div>`).join("");
+    <div class="mini">${f.inspoThumb?`<div title="Inspiration"><div class="ph inspo"><img src="${esc(inspoURL(f))}" alt="Inspiration photo"><span class="badge">INSPO</span></div></div>`:""}${parts.map(([k,it])=>`<div title="${esc(it.name)}">${phHTML(it)}</div>`).join("")}</div></div>`).join("");
   body.querySelectorAll("[data-unsave]").forEach(b=>b.onclick=async()=>{ const f=fits[+b.dataset.unsave].f; S.saved=S.saved.filter(x=>x!==f); await kvSet("saved",S.saved); renderSaved(body); });
   body.querySelectorAll("[data-wearsaved]").forEach(b=>b.onclick=async()=>{ const {parts}=fits[+b.dataset.wearsaved]; const o=Object.fromEntries(parts);
     if (!o.top||!o.bottom||!o.shoes){ toast("This fit is missing a piece you removed."); return; }
@@ -1210,7 +1212,8 @@ async function exportData(){
   try{
     const items=await Promise.all(S.items.map(async ({emb,...it})=>({...it, photo:await blobToDataURL(it.photo), thumb:await blobToDataURL(it.thumb)})));
     const diary=await Promise.all(S.diary.map(async ({emb,...e})=>({...e, photo:await blobToDataURL(e.photo), thumb:await blobToDataURL(e.thumb)})));
-    const data={app:"dailyfit", v:4, exported:new Date().toISOString(), items, diary, settings:S.settings, profile:S.profile, loc:S.loc, history:S.history, saved:S.saved, dismissed:S.dismissed, taste:S.taste};
+    const saved=await Promise.all(S.saved.map(async f=>f.inspoThumb?{...f, inspoThumb:await blobToDataURL(f.inspoThumb)}:f));
+    const data={app:"dailyfit", v:5, exported:new Date().toISOString(), items, diary, settings:S.settings, profile:S.profile, loc:S.loc, history:S.history, saved, dismissed:S.dismissed, taste:S.taste};
     const blob=new Blob([JSON.stringify(data)],{type:"application/json"}), name=`dailyfit-backup-${new Date().toISOString().slice(0,10)}.json`;
     const file=new File([blob],name,{type:"application/json"});
     if (navigator.canShare&&navigator.canShare({files:[file]})){ try{ await navigator.share({files:[file],title:"Daily Fit backup"}); return; }catch(e){ if (e&&e.name==="AbortError") return; } }
@@ -1228,7 +1231,7 @@ $("#fileImport").onchange=async e=>{
       await itemsPut(items);
       for (const de of (d.diary||[])) await diaryPut({...de, photo:await dataURLToBlob(de.photo), thumb:await dataURLToBlob(de.thumb)});
       await Promise.all([kvSet("settings",{...DEFAULT_SETTINGS,...d.settings}), kvSet("profile",{...DEFAULT_PROFILE,...d.profile}), kvSet("loc",d.loc||null),
-        kvSet("history",d.history||{wear:[],pairs:{}}), kvSet("saved",d.saved||[]), kvSet("dismissed",d.dismissed||[]), kvSet("taste",d.taste||{w:{},n:0}), kvSet("onboarded",true)]);
+        kvSet("history",d.history||{wear:[],pairs:{}}), kvSet("saved",await Promise.all((d.saved||[]).map(async f=>f.inspoThumb?{...f, inspoThumb:await dataURLToBlob(f.inspoThumb)}:f))), kvSet("dismissed",d.dismissed||[]), kvSet("taste",d.taste||{w:{},n:0}), kvSet("onboarded",true)]);
       location.reload();
     });
   }catch{ toast("That file isn't a Daily Fit backup."); }

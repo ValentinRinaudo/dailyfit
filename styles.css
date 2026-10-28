@@ -281,3 +281,13 @@ button.rowi:last-child{border-bottom:0}
 .stars button.hot{color:color-mix(in srgb,var(--accent) 55%,var(--line2))}
 .wornrow{border:0;background:var(--surface);border-radius:var(--r);padding:12px 14px;display:grid;gap:8px;text-align:left;box-shadow:var(--shadow);width:100%}
 .wornrow .k{font-weight:650;font-size:14px}
+.feature-row{display:grid;gap:10px}
+.feature{display:flex;gap:14px;align-items:center;text-align:left;border:0;background:var(--surface);border-radius:var(--r);padding:14px 16px;box-shadow:var(--shadow);transition:transform .15s var(--ease)}
+.feature:active{transform:scale(.98)}
+.feature strong{display:block;font-size:15px}
+.feature .h{display:block;font-size:13px;color:var(--muted);line-height:1.35;margin-top:2px}
+.ficon{width:44px;height:44px;border-radius:14px;background:var(--accent-soft);display:grid;place-items:center;flex:0 0 auto}
+.ficon .icon{stroke:var(--accent);width:22px;height:22px}
+.linkbtn{display:inline-flex;align-items:center;gap:6px}
+.linkbtn .icon{width:18px;height:18px}
+.ph.inspo{outline:2px solid var(--accent);outline-offset:-2px}
