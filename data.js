@@ -61,6 +61,36 @@ window.DF_DATA = {
   ],
   out: ["Oversized logo tee as the whole outfit", "Ultra-baggy, extreme low-rise jeans", "Skinny jeans"],
 
+
+  /* ---- vibes: optional direction when no fit works. Rules distilled from the cited guides; "house rule" = Daily Fit's own default ---- */
+  vibes: [
+    {id:"uni", name:"Uni", form:1, likes:["minimal","workwear","vintage","sport","tech"], avoid:[], patterns:true, palette:null, hat:true, jewel:[0,2],
+     prompts:["a casual menswear outfit for university class","comfortable relaxed streetwear for campus"],
+     tip:"Pulled together but comfortable. Skip stained or scruffy pieces; clean sneakers.",
+     source:{title:"How do I dress smartly for college? (Mr Porter)", url:"https://www.mrporter.com/en-th/journal/fashion/you-asked-how-do-i-dress-smartly-for-college-in-2020-1080456"}},
+    {id:"chill", name:"Chill day", form:1, likes:["sport","graphic","skate","vintage"], avoid:["tailored"], patterns:true, palette:null, hat:true, jewel:[0,1],
+     prompts:["a relaxed casual weekend outfit for men","comfortable loungewear streetwear"],
+     tip:"Comfort first: relaxed cuts, soft layers, sneakers.", source:null},
+    {id:"date", name:"Date", form:2, likes:["minimal","tailored","vintage"], avoid:["sport","graphic"], patterns:false, palette:"tonal", hat:false, jewel:[1,3],
+     prompts:["a smart casual date night outfit for men","a clean tonal menswear outfit with a jacket"],
+     tip:"Your own style, one notch up: clean basics, tonal colours, a good jacket, clean shoes. Not a costume.",
+     source:{title:"What to wear on a first date (ASOS)", url:"https://www.asos.com/men/fashion-feed/2025_10_13-mon/what-to-wear-on-a-first-date"}},
+    {id:"restaurant", name:"Restaurant", form:2, likes:["tailored","workwear","minimal","vintage"], avoid:["sport"], patterns:false, palette:"earthy", hat:false, jewel:[1,2], indoor:true,
+     prompts:["a smart casual dinner outfit for men","an overshirt and trousers outfit"],
+     tip:"Smart casual with texture, no gym pieces. Don't over-bundle: restaurants are warm inside.",
+     source:{title:"Casual dinner outfits (The Modest Man)", url:"https://www.themodestman.com/casual-dinner-outfits/"}},
+    {id:"work", name:"Work", form:2.6, likes:["tailored","minimal"], avoid:["graphic","sport","skate"], patterns:false, palette:"neutral", hat:false, jewel:[0,1], indoor:true,
+     prompts:["a smart business casual outfit for men","a minimal menswear office outfit"],
+     tip:"Quiet and neat: neutrals, no graphics, at most one piece of jewellery.", source:null},
+    {id:"night", name:"Night out", form:2, likes:["vintage","tailored","minimal","graphic"], avoid:["sport","gorpcore"], patterns:true, palette:"blackaccent", hat:true, jewel:[2,3],
+     prompts:["an all black streetwear night out outfit with silver jewellery","a leather jacket night out outfit"],
+     tip:"Black base, one accent, more jewellery, something glossy.",
+     source:{title:"Men's Fashion Trends 2026 (Pause)", url:"https://pausemag.co.uk/2025/12/mens-fashion-trends-2026-street-style-nightlife-aesthetics-modern-menswear/"}},
+    {id:"active", name:"Active", form:1, likes:["sport","tech","gorpcore"], avoid:["tailored"], patterns:true, palette:null, hat:true, jewel:[0,0],
+     prompts:["an athletic sportswear outfit for men","a technical training outfit"],
+     tip:"Sportswear and technical layers; jewellery stays home.", source:null}
+  ],
+
   /* ---- shopping picks; `q` holds search terms per language ---- */
   picks: [
     {id:"p-denim", name:"Relaxed straight-leg jeans", cat:"bottom", fit:"relaxed", color:"black", warmth:2, trend:"relaxed-denim",
@@ -95,6 +125,9 @@ window.DF_DATA = {
     {id:"p-cord", name:"Brown corduroy overshirt", cat:"layer", fit:"relaxed", color:"brown", warmth:2, styles:["workwear"], trend:"three-layers",
      why:"Texture for the three-layer look: over a tee, under a shell or down jacket.",
      q:{en:["corduroy overshirt"], ko:["코듀로이 셔츠"], de:["Cord Overshirt Herren"]}},
+    {id:"p-chain", name:"Silver curb chain, 3–4 mm", cat:"jewelry", sub:"chain", metal:"silver", color:"light grey", warmth:1, trend:"after-dark",
+     why:"One chain you can wear daily; silver keeps it consistent with the rest of your jewellery and pops on black and grey.",
+     q:{en:["silver curb chain 3mm"], ko:["실버 체인 목걸이"], de:["Silberkette Herren 3mm"]}},
     {id:"p-leather", name:"Black leather jacket, boxy cut", cat:"outer", fit:"relaxed", color:"black", warmth:2, styles:["vintage"], trend:"eu-leather", regions:["DE","CH"],
      why:"The European street-style outer layer of the season; boxy rather than biker-tight.",
      q:{en:["boxy leather jacket"], ko:["레더 자켓"], de:["Lederjacke Herren boxy"]}}

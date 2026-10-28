@@ -169,3 +169,23 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   @keyframes up{from{transform:translateY(24px)}to{transform:none}}
   @keyframes shimmer{to{background-position:-200% 0}}
 }
+
+/* v4 additions: jewellery row, vibes, diary, AI chips */
+.collage.acc{grid-template-columns:repeat(6,1fr)}
+.collage.acc .piece{grid-column:span 1}
+.collage.acc .ph{aspect-ratio:1/1}
+.collage.acc .nm{display:none}
+@media (max-width:420px){.collage.acc{grid-template-columns:repeat(4,1fr)}}
+.vibebar{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;border:2px solid var(--accent);padding:10px 12px;background:var(--surface)}
+.vibebar strong{font-family:var(--f-display);font-stretch:112%;text-transform:uppercase}
+.aichip{font-family:var(--f-mono);font-size:10px;letter-spacing:.06em;background:var(--accent);color:var(--accent-ink);padding:1px 5px;margin-left:4px;vertical-align:1px}
+.stars{display:flex;gap:2px}
+.stars button{border:0;background:transparent;font-size:30px;line-height:1;padding:2px 3px;color:var(--line);min-width:40px;min-height:44px}
+.stars button[aria-pressed="true"]{color:var(--accent)}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
+.ditem{border:0;background:transparent;padding:0;text-align:left;display:grid;gap:4px;min-width:0}
+.ph.tall{aspect-ratio:3/4}
+.mini.sel .item{position:relative}
+.mini.sel .item .ph{outline:2px solid transparent;outline-offset:-2px;opacity:.55;transition:opacity .15s}
+.mini.sel .item[aria-pressed="true"] .ph{outline-color:var(--accent);opacity:1}
+.two .btn,.row .btn.block{white-space:normal;min-width:0;text-align:center;line-height:1.15}
