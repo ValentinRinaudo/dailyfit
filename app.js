@@ -26,7 +26,7 @@ const DIARY_TAGS = ["Felt sharp","Comfy","Got compliments","Too warm","Too cold"
 const DEFAULT_SETTINGS = {mixPatterns:false, avoidRepeatDays:3, headwear:"auto", gloves:"auto", jewelry:"auto", avoidSkinny:true,
   outStart:9, outEnd:22, manual:false, manualTemp:15, manualRain:false, units:"C", theme:"system", region:"auto",
   thermal:0, aiEnabled:false, autoTag:true};
-const DEFAULT_PROFILE = {height:"1.80 m", weight:"70 kg", hair:"Black buzz cut", jewelry:"Mostly silver"};
+const DEFAULT_PROFILE = {name:"", height:"1.80 m", weight:"70 kg", hair:"Black buzz cut", jewelry:"Mostly silver"};
 
 /* AI prompt ensembles (category accuracy measured at 95% on 125 catalogue photos) */
 const P_CAT = {
@@ -434,7 +434,7 @@ const aiReady = () => !!AI && AI.state==="ready";
 async function enableAI(){
   S.settings.aiEnabled=true; saveSettings();
   try{ await AI.load(); await afterAILoad(); toast("On-device AI is ready."); }
-  catch{ toast("The AI model couldn't download. Check your connection and try again in Settings."); }
+  catch{ toast("The AI model couldn't download. Check your connection and try again under You."); }
 }
 async function afterAILoad(){
   for (const v of D.vibes) S.vibeVecs[v.id]=await AI.textVector(v.prompts);
@@ -529,75 +529,86 @@ function confirmSheet(text, okLabel, fn){
 function busySheet(text){ return openSheet(`<h2>${esc(text)}</h2><div class="skeleton"></div><p class="muted small">Running on your phone. This takes a few seconds.</p>`); }
 
 /* ================= navigation ================= */
-function setTab(t){ S.tab=t; document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-current",String(b.dataset.tab===t)));
-  try{ history.replaceState(history.state,"","#"+t); }catch{} render(); window.scrollTo(0,0); }
+function setTab(t){ if (t==="settings") t="you";
+  const go=()=>{ S.tab=t; document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-current",String(b.dataset.tab===t)));
+    try{ history.replaceState(history.state,"","#"+t); }catch{} render(); window.scrollTo(0,0); };
+  if (document.startViewTransition && !matchMedia("(prefers-reduced-motion: reduce)").matches) document.startViewTransition(go); else go(); }
 function render(){
   const v=$("#view");
   $("#dateLabel").textContent=new Date().toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long"});
-  const ta=$("#topActions"); ta.innerHTML=`<button type="button" class="btn primary" id="addBtn">+ Add</button>`; $("#addBtn").onclick=addMenu;
+  $("#avatarBtn").innerHTML=avatarHTML();
   if (!S.ready){ v.innerHTML=`<div class="skeleton"></div>`; return; }
-  ({today:renderToday,closet:renderCloset,shop:renderShop,settings:renderSettings})[S.tab](v);
+  ({today:renderToday,closet:renderCloset,shop:renderShop,you:renderYou})[S.tab](v);
 }
 
 /* ================= TODAY ================= */
+const IC = {
+  refresh:'<svg class="icon" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5"/></svg>',
+  shuffle:'<svg class="icon" viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>',
+  spark:'<svg class="icon" viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z"/></svg>',
+  mirror:'<svg class="icon" viewBox="0 0 24 24"><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M10 8l3-2M9.5 12l5-3.5"/></svg>',
+  heart:'<svg class="icon" viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10Z"/></svg>',
+  x:'<svg class="icon" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  check:'<svg class="icon" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>'
+};
 function renderToday(v){
   const c=conditions(), st=S.settings, V=vibeObj();
   const res=avail().length?generate(c):null; if (res) S.outfits=res.list;
   const p=res?res.p:weatherPlan(c);
-  const locName=S.loc?S.loc.name:"No location";
-  const wxLine = c.source==="forecast" ? `${esc(locName)} · ${S.wxState==="loading"?"updating…":"updated "+ago(S.weather.fetchedAt)}`
-    : c.source==="manual" ? "Temperature set by you" : S.wxState==="loading" ? "Loading forecast…" : S.loc ? (S.wxState==="offline"?"Offline · set it by hand":"Forecast unavailable · set it by hand") : "No location · set it by hand";
+  const fc=c.source==="forecast";
+  const place=S.loc?S.loc.name:"";
+  const sub = fc ? `${S.wxState==="loading"?"Updating…":"Feels "+deg(c.low)+" to "+deg(c.high)+(c.late?" in the next hours":" while you're out")}`
+    : c.source==="manual" ? "Set by you" : S.wxState==="loading" ? "Loading forecast…" : S.loc ? "Forecast unavailable" : "No location yet";
   const hours=c.hours.map(h=>`<div class="hr${c.window.includes(h.t)?" in":""}"><span>${h.t.slice(11,13)}</span><b>${deg(h.feels)}</b><span>${h.pop>=30?h.pop+"%":"&nbsp;"}</span></div>`).join("");
   const lockCount=Object.keys(S.locks).length;
   v.innerHTML=`<div class="stack">
   <section class="wx" aria-label="Weather">
-    <div class="row between"><span class="label">${wxLine}</span>
-      ${S.loc?`<button type="button" class="btn icon" id="wxRefresh" aria-label="Refresh forecast" title="Refresh forecast">↻</button>`:`<button type="button" class="btn" id="setLoc">Set location</button>`}</div>
-    <div class="big">
-      <div class="temp" id="tempOut">${c.source==="forecast"?deg(c.nowFeels):deg(c.temp)}</div>
-      <div><div class="cond">${esc(c.label||(c.source==="forecast"?"":"Your call"))}${c.wet?" · wet":""}${c.snow?" · snow":""}</div>
-        <div class="label">${c.source==="forecast"?(c.late?`feels like now · next hours ${deg(c.low)}–${deg(c.high)}`:`feels like now · out ${st.outStart}–${st.outEnd}h ${deg(c.low)} to ${deg(c.high)}`):"dressing for this"}</div></div>
+    <div class="wx-main">
+      <div class="wx-temp" id="tempOut">${fc?deg(c.nowFeels):deg(c.temp)}</div>
+      <div class="grow"><div class="wx-cond">${esc(fc?c.label:"Your call")}${c.wet?" · wet":""}${c.snow?" · snow":""}${place&&fc?` <span class="muted">· ${esc(place)}</span>`:""}</div><div class="wx-sub">${sub}</div></div>
+      ${S.loc&&fc?`<button type="button" class="btn icon-only quiet" id="wxRefresh" aria-label="Refresh forecast">${IC.refresh}</button>`:""}
     </div>
     ${hours?`<div class="hours" aria-label="Hourly feels-like">${hours}</div>`:""}
-    ${c.source!=="forecast"?`<input type="range" id="tempIn" min="-20" max="38" step="1" value="${st.manualTemp}" aria-label="Temperature">
-      <div class="seg"><button type="button" id="rainBtn" aria-pressed="${st.manualRain}">${st.manualRain?"Rain or snow":"Dry"}</button></div>`:""}
-    <div class="label">${esc(p.note)}${p.swing?" "+esc(p.swing):""}</div>
+    ${!fc?`<input type="range" id="tempIn" min="-20" max="38" step="1" value="${st.manualTemp}" aria-label="Temperature">
+      <div class="row"><div class="seg"><button type="button" id="rainBtn" aria-pressed="${st.manualRain}">${st.manualRain?"Rain or snow":"Dry"}</button></div></div>`:""}
+    <div class="wx-note"><span>${esc(p.note)}${p.swing?" "+esc(p.swing):""}</span>
+      ${S.loc&&fc?`<button type="button" class="linkbtn" id="manualOn">Set it myself</button>`:st.manual?`<button type="button" class="linkbtn" id="manualOff">Use forecast</button>`:!S.loc?`<button type="button" class="linkbtn" id="setLoc">Set location</button>`:""}</div>
   </section>
-  ${V?`<div class="vibebar"><div><span class="label">Vibe</span> <strong>${esc(V.name)}</strong><p class="small muted">${esc(V.tip)}</p></div><button type="button" class="btn quiet" id="clearVibe" aria-label="Clear vibe">✕ Clear</button></div>`:""}
+  ${S.items.length?`<div class="stack tight">${seg("vibe",[["","Any"],...D.vibes.map(x=>[x.id,x.name])],S.vibe||"","scroll vibes")}${V?`<p class="vibetip">${esc(V.tip)}</p>`:""}</div>`:""}
   <div id="fits"></div>
-  ${S.items.length?`<section class="stack tight">
-    <span class="label">${V?"Try another vibe":"Nothing feels right? Pick a vibe"}</span>
-    ${seg("vibe",D.vibes.map(x=>[x.id,x.name]),S.vibe||"","scroll")}
-    <div class="two"><button type="button" class="btn" id="recreateBtn">◎ Recreate a look</button><button type="button" class="btn quiet" id="mirrorBtn">▣ Log a mirror pic</button></div>
-  </section>`:""}
+  ${S.items.length?`<div class="actions">
+    <button type="button" class="action" id="shuffle">${IC.shuffle}New fits</button>
+    <button type="button" class="action" id="recreateBtn">${IC.spark}Recreate a look</button>
+    <button type="button" class="action" id="mirrorBtn">${IC.mirror}Mirror pic</button></div>
+    ${lockCount?`<div class="row between"><span class="muted small">${lockCount} piece${lockCount>1?"s":""} locked in</span><button type="button" class="linkbtn" id="unlock">Unlock all</button></div>`:""}`:""}
   </div>`;
   const fits=$("#fits");
   if (!S.items.length) fits.innerHTML=needsHTML();
   else if (!res) fits.innerHTML=`<div class="notice solid">Everything is in the wash. Mark pieces as clean in the closet.</div>`;
-  else if (res.missing.length) fits.innerHTML=`<div class="notice solid">For ${deg(c.temp)} you still need ${res.missing.map(esc).join(", ")}. ${S.items.some(i=>i.inWash)?"Some pieces are in the wash. ":""}The Shop tab suggests what to get.</div>`;
+  else if (res.missing.length) fits.innerHTML=`<div class="notice solid">For ${deg(c.temp)} you still need ${res.missing.map(esc).join(", ")}. The Shop tab suggests what to get.</div>`;
   else {
     S.lookIdx=Math.min(S.lookIdx,res.list.length-1);
     fits.innerHTML=`<div class="stack tight">${res.soft.length?`<div class="notice">${res.soft.map(esc).join(" ")}</div>`:""}
       <div class="strip" id="strip">${res.list.map(lookHTML).join("")}</div>
-      ${res.list.length>1?`<div class="dotsnav" aria-hidden="true">${res.list.map((_,i)=>`<span class="${i===S.lookIdx?"on":""}"></span>`).join("")}</div>`:""}
-      <div class="row between"><button type="button" class="btn" id="shuffle">↻ Three more</button>
-        ${lockCount?`<button type="button" class="btn quiet" id="unlock">Unlock ${lockCount}</button>`:`<span class="muted small">Tap a piece to lock or swap it.</span>`}</div></div>`;
+      ${res.list.length>1?`<div class="dotsnav" aria-hidden="true">${res.list.map((_,i)=>`<span class="${i===S.lookIdx?"on":""}"></span>`).join("")}</div>`:""}</div>`;
     const strip=$("#strip");
     strip.onscroll=debounce(()=>{ const w=strip.firstElementChild.getBoundingClientRect().width+12; S.lookIdx=Math.round(strip.scrollLeft/w);
-      document.querySelectorAll(".dotsnav span").forEach((d,i)=>d.classList.toggle("on",i===S.lookIdx)); },60);
+      document.querySelectorAll(".dotsnav span").forEach((d,i)=>d.classList.toggle("on",i===S.lookIdx)); },50);
     if (S.lookIdx>0) requestAnimationFrame(()=>{ const w=strip.firstElementChild.getBoundingClientRect().width+12; strip.scrollLeft=S.lookIdx*w; });
-    $("#shuffle").onclick=()=>{ S.outfits.forEach(o=>S.skipped.add(o.key)); S.lookIdx=0; render(); };
-    const ul=$("#unlock"); if (ul) ul.onclick=()=>{ S.locks={}; render(); };
     bindLooks(fits,c);
   }
+  const on=(id,fn)=>{ const el=$(id); if (el) el.onclick=fn; };
   const ti=$("#tempIn"); if (ti){ ti.oninput=e=>{ st.manualTemp=+e.target.value; $("#tempOut").textContent=deg(st.manualTemp); }; ti.onchange=()=>{ S.skipped.clear(); saveSettings(); render(); }; }
-  const rb=$("#rainBtn"); if (rb) rb.onclick=()=>{ st.manualRain=!st.manualRain; saveSettings(); render(); };
-  const wr=$("#wxRefresh"); if (wr) wr.onclick=()=>fetchWeather(true);
-  const sl=$("#setLoc"); if (sl) sl.onclick=locationSheet;
-  const cv=$("#clearVibe"); if (cv) cv.onclick=()=>{ S.vibe=null; S.skipped.clear(); S.lookIdx=0; render(); };
-  v.querySelectorAll("[data-vibe]").forEach(b=>b.onclick=()=>{ S.vibe=S.vibe===b.dataset.vibe?null:b.dataset.vibe; S.skipped.clear(); S.lookIdx=0; render(); window.scrollTo({top:0,behavior:"smooth"}); });
-  const rc=$("#recreateBtn"); if (rc) rc.onclick=startRecreate;
-  const mb=$("#mirrorBtn"); if (mb) mb.onclick=()=>startDiary();
+  on("#rainBtn",()=>{ st.manualRain=!st.manualRain; saveSettings(); render(); });
+  on("#wxRefresh",()=>fetchWeather(true));
+  on("#setLoc",locationSheet);
+  on("#manualOn",()=>{ st.manual=true; st.manualTemp=c.temp; saveSettings(); S.skipped.clear(); render(); });
+  on("#manualOff",()=>{ st.manual=false; saveSettings(); S.skipped.clear(); render(); });
+  on("#shuffle",()=>{ S.outfits.forEach(o=>S.skipped.add(o.key)); S.lookIdx=0; render(); });
+  on("#unlock",()=>{ S.locks={}; render(); });
+  on("#recreateBtn",startRecreate);
+  on("#mirrorBtn",()=>startDiary());
+  v.querySelectorAll("[data-vibe]").forEach(b=>b.onclick=()=>{ S.vibe=b.dataset.vibe||null; S.skipped.clear(); S.lookIdx=0; buzz(); render(); });
 }
 function bindLooks(root,c){
   root.querySelectorAll("[data-wear]").forEach(b=>b.onclick=()=>wear(+b.dataset.wear));
@@ -607,21 +618,22 @@ function bindLooks(root,c){
 }
 function collageHTML(o, i, interactive=true){
   const ups=["outer","layer","top"].filter(k=>o[k]);
-  const slot=(k,cls)=>{ if (!o[k]) return ""; const inner=`${phHTML(o[k],{badge:S.locks[k]===o[k].id?'<span class="badge lock">LOCK</span>':""})}<span class="label">${SLOT_LABEL[k]}</span><span class="nm">${esc(o[k].name)}</span>`;
-    return interactive?`<button type="button" class="piece ${cls}" data-piece="${i}:${k}" aria-label="${esc(SLOT_LABEL[k]+": "+o[k].name)}">${inner}</button>`:`<div class="piece ${cls}">${inner}</div>`; };
+  const slot=(k,cls)=>{ if (!o[k]) return ""; const inner=`${phHTML(o[k],{badge:S.locks[k]===o[k].id?'<span class="badge lock">LOCKED</span>':""})}<span class="tag">${SLOT_LABEL[k]}</span>`;
+    return interactive?`<button type="button" class="piece ${cls}" data-piece="${i}:${k}" aria-label="${esc(SLOT_LABEL[k]+": "+o[k].name)}">${inner}</button>`:`<div class="piece ${cls}" title="${esc(o[k].name)}">${inner}</div>`; };
   const acc=["hat","gloves",...JSLOTS].filter(k=>o[k]);
   return `<div class="collage">${ups.map(k=>slot(k,ups.length===1?"wide":"")).join("")}${slot("bottom","wide")}${slot("shoes","wide")}</div>
     ${acc.length?`<div class="collage acc">${acc.map(k=>slot(k,"")).join("")}</div>`:""}`;
 }
 function lookHTML(o,i){
   const isSaved=S.saved.some(f=>f.key===o.key);
+  const top=o.tags.slice(0,3), rest=o.tags.slice(3);
   return `<article class="look" aria-label="Fit ${i+1}">
-    <div class="row between"><div class="num">${String(i+1).padStart(2,"0")}</div><div class="row"><span class="score">score ${o.score.toFixed(1)}</span>
-      <button type="button" class="btn icon quiet" data-save="${i}" aria-label="${isSaved?"Saved":"Save fit"}" aria-pressed="${isSaved}">${isSaved?"★":"☆"}</button></div></div>
+    <div class="look-head"><span class="look-num">Fit ${String(i+1).padStart(2,"0")}</span>
+      <button type="button" class="savebtn" data-save="${i}" aria-label="${isSaved?"Saved":"Save fit"}" aria-pressed="${isSaved}">${IC.heart}</button></div>
     ${collageHTML(o,i)}
-    <div class="chips">${o.tags.map(t=>`<span class="chip ${t.c}">${t.c==="trend"?"◆ ":""}${esc(t.t)}</span>`).join("")}</div>
-    <div class="chips">${o.why.map(r=>`<span class="chip">${esc(r)}</span>`).join("")}</div>
-    <div class="row"><button type="button" class="btn accent" data-wear="${i}">Wearing this</button><button type="button" class="btn quiet" data-skip="${i}">Not this</button></div>
+    ${top.length?`<div class="chips">${top.map(t=>`<span class="chip ${t.c}">${esc(t.t)}</span>`).join("")}</div>`:""}
+    <details class="why"><summary>Why this works</summary><div class="chips">${[...o.why.map(r=>({t:r,c:""})),...rest].map(t=>`<span class="chip ${t.c}">${esc(t.t)}</span>`).join("")}</div></details>
+    <div class="look-actions"><button type="button" class="btn icon-only quiet" data-skip="${i}" aria-label="Not this one">${IC.x}</button><button type="button" class="btn accent" data-wear="${i}">${IC.check}Wear this</button></div>
   </article>`;
 }
 function pieceSheet(i, slot, c){
@@ -712,7 +724,7 @@ function aiNeededSheet(why){
   const p=openSheet(`<h2>Turn on the fashion AI</h2><p>${esc(why)} It runs entirely on your phone: a one-time download of about 150 MB (use Wi-Fi), then it works offline and costs nothing.</p>
     <div class="row"><button type="button" class="btn accent" id="aiGo">Download and turn on</button><button type="button" class="btn quiet" id="aiNo">Not now</button></div>`);
   p.querySelector("#aiNo").onclick=closeSheet;
-  p.querySelector("#aiGo").onclick=()=>{ closeSheet(); enableAI(); setTab("settings"); };
+  p.querySelector("#aiGo").onclick=()=>{ closeSheet(); enableAI(); setTab("you"); };
 }
 
 /* ================= FIT DIARY ================= */
@@ -801,7 +813,7 @@ function renderPieces(body){
       <select id="sortSel" aria-label="Sort">${[["new","Newest"],["most","Most worn"],["least","Least worn"],["color","By colour"],["wash","In wash first"]].map(([k,l])=>`<option value="${k}" ${S.sort===k?"selected":""}>${l}</option>`).join("")}</select></div>
     ${seg("f",[["all","All"],...CATS.map(c=>[c.k,`${c.n} ${S.items.filter(i=>i.cat===c.k).length}`])],S.filter,"scroll")}
     ${washCount?`<div class="row between"><span class="muted small">${washCount} in the wash</span><button type="button" class="btn quiet" id="allClean">Mark all clean</button></div>`:""}
-    ${list.length?`<div class="grid">${list.map(it=>`<button type="button" class="item" data-id="${esc(it.id)}">${phHTML(it)}<span class="nm">${esc(it.name)}</span><span class="label">${it.wearCount?`worn ${it.wearCount}×`:"not worn yet"}</span></button>`).join("")}</div>`
+    ${list.length?`<div class="grid">${list.map(it=>`<button type="button" class="item" data-id="${esc(it.id)}">${phHTML(it)}<span class="nm">${esc(it.name)}</span><span class="sub">${it.wearCount?`Worn ${it.wearCount}×`:"Not worn yet"}</span></button>`).join("")}</div>`
       : S.items.length?`<p class="muted">Nothing matches.</p>`:needsHTML()}`;
   const qi=$("#q"); qi.oninput=debounce(()=>{ S.query=qi.value; renderPieces(body); const n=$("#q"); n.focus(); n.setSelectionRange(n.value.length,n.value.length); },180);
   $("#sortSel").onchange=e=>{ S.sort=e.target.value; renderPieces(body); };
@@ -899,8 +911,8 @@ function openEditor(item, isNew=false){
     <div class="field"><span class="label">Formality${ai("form")}</span>${seg("form",[[1,"Casual"],[2,"Smart casual"],[3,"Dressed up"]],it.form)}</div>
     ${isJ?"":`<div class="field"><span class="label">Surface${ai("pattern")}</span>${seg("pattern",[[false,"Solid"],[true,"Graphic / pattern"]],it.pattern)}</div>
     <div class="field"><span class="label">Style${ai("styles")}</span><div class="seg">${STYLES.map(s=>`<button type="button" data-style="${s}" aria-pressed="${it.styles.includes(s)}">${s}</button>`).join("")}</div></div>`}
-    <label class="toggle"><span><strong>Pin</strong><br><span class="muted small">${isJ?"Your everyday piece: added whenever the fit calls for jewellery.":"Used whenever it suits the fit. A pinned skull cap with headwear on \"Always\" goes on even when it's warm."}</span></span><input type="checkbox" id="pinIt" ${it.pinned?"checked":""}></label>
-    ${isNew||isJ?"":`<label class="toggle"><span><strong>In the wash</strong><br><span class="muted small">Left out of fits until you mark it clean.</span></span><input type="checkbox" id="washIt" ${it.inWash?"checked":""}></label>`}
+    <label class="toggle"><span><strong>Pin</strong><br><span class="muted small">${isJ?"Your everyday piece: added whenever the fit calls for jewellery.":"Used whenever it suits the fit. A pinned skull cap with headwear on \"Always\" goes on even when it's warm."}</span></span><input type="checkbox" class="switch" id="pinIt" ${it.pinned?"checked":""}></label>
+    ${isNew||isJ?"":`<label class="toggle"><span><strong>In the wash</strong><br><span class="muted small">Left out of fits until you mark it clean.</span></span><input type="checkbox" class="switch" id="washIt" ${it.inWash?"checked":""}></label>`}
     <div class="row between"><button type="button" class="btn primary" id="saveIt">${isNew?(S.queue.length?"Save & next":"Add to closet"):"Save"}</button>
       ${isNew?"":`<button type="button" class="btn danger" id="delIt">Remove</button>`}</div>
     ${isNew?"":`<p class="label">Added ${fmtDay(it.added||Date.now())} · worn ${it.wearCount||0}× ${it.lastWorn?"· last "+fmtDay(it.lastWorn):""}</p>`}`);
@@ -963,7 +975,7 @@ function renderShop(v){
       <button type="button" class="btn quiet" id="regionBtn">Change</button></div>
     <section class="stack"><div class="sectionhead"><h2>Shopping list</h2><span class="label">${missing} missing</span></div>
       ${picks.map(p=>{ const terms=[...(p.q[lang]||[]),...(lang!=="en"?p.q.en:[])]; const price=p.price&&p.price[rc];
-        return `<article class="card ${p.own?"":"missing"}">
+        return `<article class="card ${p.own?"flat":""}">
         <div class="row between"><span class="label">${esc((CATS.find(c=>c.k===p.cat)||{}).n)}${sigName(p.trend)?" · "+esc(sigName(p.trend)):""}</span>
           <span class="status ${p.own?"have":"miss"}">${p.own?"You have: "+esc(p.own.name):"Missing"}</span></div>
         <h3>${esc(p.name)}</h3><p class="small">${esc(p.why)}</p>
@@ -990,9 +1002,6 @@ function renderShop(v){
         <div class="src">${s.sources.map(x=>`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>`).join("")}</div></article>`).join("")}
       <div class="card"><span class="label">On the way out</span><div class="chips">${D.out.map(o=>`<span class="chip">${esc(o)}</span>`).join("")}</div></div>
     </section>
-    <section class="stack"><div class="sectionhead"><h2>Vibes</h2><span class="label">what each one changes</span></div>
-      ${D.vibes.map(x=>`<div class="card"><div class="row between"><strong>${esc(x.name)}</strong><span class="label">${FORM[Math.min(3,Math.round(x.form))]} · jewellery ${x.jewel[0]}–${x.jewel[1]}</span></div><p class="small">${esc(x.tip)}</p>
-        ${x.source?`<div class="src"><a href="${esc(x.source.url)}" target="_blank" rel="noopener">${esc(x.source.title)}</a></div>`:`<span class="small muted">Daily Fit house rule</span>`}</div>`).join("")}
     </section></div>`;
   v.querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>copyText(b.dataset.copy));
   v.querySelectorAll("[data-dismiss]").forEach(b=>b.onclick=async()=>{ S.dismissed.push(b.dataset.dismiss); await kvSet("dismissed",S.dismissed); render(); toast("Hidden from your list.",{label:"Undo",fn:async()=>{ S.dismissed.pop(); await kvSet("dismissed",S.dismissed); render(); }}); });
@@ -1034,87 +1043,86 @@ function locationSheet(){
   setTimeout(()=>q.focus(),250);
 }
 
-/* ================= SETTINGS ================= */
-function renderSettings(v){
+/* ================= YOU (personal space + app settings) ================= */
+const PERSON='<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>';
+const initials = () => { const n=(S.profile.name||"").trim(); if (!n) return ""; return n.split(/\s+/).map(w=>w[0]).slice(0,2).join("").toUpperCase(); };
+const avatarHTML = () => initials() ? esc(initials()) : PERSON;
+const JEWEL_PREF=[["Mostly silver","Silver"],["Mostly gold","Gold"],["Mixed metals","Mixed"],["None","None"]];
+function renderYou(v){
   const st=S.settings, pr=S.profile, hrs=[...Array(24).keys()];
-  const mode=(key,label,help,opts=[["auto","By weather"],["always","Always"],["never","Never"]])=>`<div class="field"><span class="label">${label}</span>${seg("m-"+key,opts,st[key])}${help?`<p class="muted small">${help}</p>`:""}</div>`;
   const aiState=AI?AI.state:"off";
   const learned=Object.entries(S.taste.w).filter(([,w])=>Math.abs(w)>.25).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,8);
+  const worn=S.history.wear.length, rated=S.diary.filter(e=>e.rating), avg=rated.length?(rated.reduce((a,e)=>a+e.rating,0)/rated.length).toFixed(1):"–";
+  const habit=(key,opts)=>seg("m-"+key,opts,st[key]);
+  const jp=JEWEL_PREF.find(([k])=>k===pr.jewelry)?pr.jewelry:(/gold/i.test(pr.jewelry||"")?"Mostly gold":/none|no /i.test(pr.jewelry||"")?"None":"Mostly silver");
   v.innerHTML=`<div class="stack">
-    <section class="stack"><div class="sectionhead"><h2>Fashion AI</h2><span class="label">on this phone</span></div>
-      ${aiState==="ready"?`<div class="notice solid">On. ${S.items.filter(i=>i.emb).length} of ${S.items.length} pieces analysed${S.aiBusy?" (working…)":""}. Runs offline; nothing leaves your phone.</div>
-        <label class="toggle"><span><strong>Auto-tag new pieces</strong><br><span class="muted small">Pre-fills type, style, fit and more when you add a photo.</span></span><input type="checkbox" id="autoTag" ${st.autoTag?"checked":""}></label>`
-      : aiState==="loading"?`<div class="notice">Downloading the model: ${Math.round((AI.progress||0)*100)}%. Keep the app open.</div>`
-      : `<p class="small">FashionCLIP (Marqo's fashion-trained vision model) runs inside the app. It powers auto-tagging, recreating looks from inspiration photos, recognising pieces in mirror pics and learning your style from rated fits.</p>
-         <p class="muted small">One-time download of about 150 MB; use Wi-Fi. After that it works offline and costs nothing.${aiState==="error"?" Last attempt failed: "+esc(AI.error):""}</p>
-         <button type="button" class="btn accent" id="aiOn">${aiState==="error"?"Try again":"Download and turn on"}</button>`}
+    <section class="me">
+      <div class="me-top"><div class="avatar lg" aria-hidden="true">${avatarHTML()}</div>
+        <div style="flex:1;min-width:0"><input class="me-name" id="pName" type="text" value="${esc(pr.name||"")}" placeholder="Your name" aria-label="Your name" autocomplete="off">
+        <div class="muted small">${esc([pr.height,pr.weight,pr.hair].filter(Boolean).join(" · "))}</div></div></div>
+      <div class="stats"><div class="stat"><b>${S.items.length}</b><span>pieces</span></div><div class="stat"><b>${worn}</b><span>fits worn</span></div><div class="stat"><b>${avg}</b><span>avg rating</span></div></div>
+      <div class="stack tight"><span class="label">Style DNA</span>
+        ${learned.length&&S.taste.n>=5?`<div class="chips">${learned.map(([k,w])=>`<span class="chip ${w>0?"trend":"warn"}">${w>0?"":"no "}${esc(featText(k))}</span>`).join("")}</div>`
+          :`<p class="muted small">Builds itself as you wear, skip and rate fits.</p>`}
+        ${S.taste.n?`<button type="button" class="linkbtn" id="resetTaste" style="justify-self:start">Reset Style DNA</button>`:""}</div>
     </section>
-    <section class="stack"><div class="sectionhead"><h2>What it has learned</h2><span class="label">${Math.round(S.taste.n)} signals</span></div>
-      ${learned.length&&S.taste.n>=5?`<div class="chips">${learned.map(([k,w])=>`<span class="chip ${w>0?"trend":"warn"}">${w>0?"+ likes":"− avoids"} ${esc(featText(k))}</span>`).join("")}</div>`
-        :`<p class="muted small">Every "Wearing this", "Not this", saved fit and rated mirror pic trains a small model of your taste. It starts steering suggestions after a handful of signals and is fully weighted after about 30.</p>`}
-      <div class="toggle"><span><strong>Warmth preference</strong><br><span class="muted small">${st.thermal?`Dressing you as if it's ${Math.abs(st.thermal)}° ${st.thermal>0?"colder":"warmer"} than the forecast.`:"Learns from \"Too cold\" and \"Too warm\" in the diary."}</span></span>
-        <span class="row"><button type="button" class="btn icon quiet" id="thMinus" aria-label="Dress lighter">−</button><span class="tnum">${st.thermal>0?"+":""}${st.thermal||0}°</span><button type="button" class="btn icon quiet" id="thPlus" aria-label="Dress warmer">+</button></span></div>
-      <button type="button" class="btn quiet" id="resetTaste">Reset what it learned</button>
-    </section>
-    <section class="stack"><div class="sectionhead"><h2>Location</h2></div>
-      <button type="button" class="card" id="locBtn" style="text-align:left;cursor:pointer"><span class="label">Weather, stores and trends for</span><strong>${S.loc?esc(S.loc.name)+(S.loc.source==="gps"?" (GPS)":""):"Not set — tap to choose"}</strong></button>
-      <button type="button" class="card" id="regBtn" style="text-align:left;cursor:pointer"><span class="label">Shopping region</span><strong>${esc(region().name)}${st.region==="auto"?" (automatic)":""}</strong></button>
-      <label class="toggle"><span><strong>Set the temperature myself</strong><br><span class="muted small">Ignore the forecast and use a slider.</span></span><input type="checkbox" id="manual" ${st.manual?"checked":""}></label>
-      <div class="two"><div class="field"><label class="label" for="oS">Out from</label><select id="oS">${hrs.map(h=>`<option value="${h}" ${h===st.outStart?"selected":""}>${h}:00</option>`).join("")}</select></div>
-        <div class="field"><label class="label" for="oE">Until</label><select id="oE">${hrs.map(h=>`<option value="${h}" ${h===st.outEnd?"selected":""}>${h}:00</option>`).join("")}</select></div></div>
-    </section>
-    <section class="stack"><div class="sectionhead"><h2>You</h2></div>
-      <div class="two">
-        <div class="field"><label class="label" for="pH">Height</label><input type="text" id="pH" value="${esc(pr.height)}"></div>
-        <div class="field"><label class="label" for="pW">Weight</label><input type="text" id="pW" value="${esc(pr.weight)}"></div>
-        <div class="field"><label class="label" for="pHair">Hair</label><input type="text" id="pHair" value="${esc(pr.hair)}"></div>
-        <div class="field"><label class="label" for="pJ">Jewellery</label><input type="text" id="pJ" value="${esc(pr.jewelry)}"></div>
-      </div>
-      <label class="toggle"><span><strong>No skinny fits</strong><br><span class="muted small">Slim bottoms go to the back of the line.</span></span><input type="checkbox" id="avoidSkinny" ${st.avoidSkinny?"checked":""}></label>
-    </section>
-    <section class="stack"><div class="sectionhead"><h2>Accessories</h2></div>
-      ${mode("headwear","Headwear",'"Always" puts a hat on every fit. Pin a piece (your skull cap, say) to make it the first choice, even when it\'s warm.')}
-      ${mode("gloves","Gloves","")}
-      ${mode("jewelry","Jewellery","1–2 pieces normally; the vibe changes it (more for nights out, none for active days). Pinned pieces come first; rings come off when gloves go on.",[["auto","Automatic"],["never","Never"]])}
-    </section>
-    <section class="stack"><div class="sectionhead"><h2>Rules</h2></div>
-      <label class="toggle"><span><strong>Mix patterns</strong><br><span class="muted small">Off: one graphic or patterned piece per fit.</span></span><input type="checkbox" id="mixP" ${st.mixPatterns?"checked":""}></label>
-      <div class="toggle"><span><strong>Rest worn pieces</strong><br><span class="muted small">Days before a worn piece comes back to the top.</span></span><select id="rest" aria-label="Rest days">${[0,1,2,3,5,7].map(n=>`<option ${n===st.avoidRepeatDays?"selected":""}>${n}</option>`).join("")}</select></div>
-      <div class="field"><span class="label">Units</span>${seg("units",[["C","°C"],["F","°F"]],st.units)}</div>
-      <div class="field"><span class="label">Theme</span>${seg("theme",[["system","System"],["light","Light"],["dark","Dark"]],st.theme)}</div>
-    </section>
-    <section class="stack"><div class="sectionhead"><h2>Your data</h2><span class="label" id="storeUse"></span></div>
-      <p class="muted small">Your closet and diary live only on this phone. Back up now and then, and before changing phones.</p>
-      <div class="two"><button type="button" class="btn" id="exportBtn">Back up</button><button type="button" class="btn quiet" id="importBtn">Restore</button></div>
-      <button type="button" class="btn danger" id="wipe">Delete everything</button>
-    </section>
-    <section class="stack"><div class="sectionhead"><h2>How it works</h2></div>
-      <div class="notice">Weather sets warmth and layers. Colour scores best as one accent on neutrals. Relaxed and wide cuts beat slim. Jewellery follows the vibe and keeps metals consistent. A learned model of your taste, your best-rated mirror pics (via the AI) and current trend signals add points. No account, no tracking; the only network calls are the free forecast, city search and the one-time AI download.</div>
-      <p class="label">Daily Fit 4.0 · trend data ${esc(D.compiled)}</p>
-    </section>
+
+    <section><div class="group-title label">About you</div><div class="group">
+      <div class="rowi"><span class="k">Height</span><input type="text" id="pH" value="${esc(pr.height)}" aria-label="Height"></div>
+      <div class="rowi"><span class="k">Weight</span><input type="text" id="pW" value="${esc(pr.weight)}" aria-label="Weight"></div>
+      <div class="rowi"><span class="k">Hair</span><input type="text" id="pHair" value="${esc(pr.hair)}" aria-label="Hair"></div>
+      <div class="rowi stackrow"><span class="k">Jewellery you wear</span>${seg("jp",JEWEL_PREF,jp)}</div>
+      <div class="rowi stackrow"><span class="k">Fits</span>${seg("skinny",[["avoid","No skinny fits"],["any","Anything goes"]],st.avoidSkinny?"avoid":"any")}</div>
+    </div></section>
+
+    <section><div class="group-title label">Your habits</div><div class="group">
+      <div class="rowi stackrow"><span class="k">Headwear</span>${habit("headwear",[["auto","When it's cold"],["always","Always"],["never","Never"]])}<span class="h">Pin a cap or skull cap in the closet to make it your go-to.</span></div>
+      <div class="rowi stackrow"><span class="k">Gloves</span>${habit("gloves",[["auto","When it's cold"],["always","Always"],["never","Never"]])}</div>
+      <div class="rowi stackrow"><span class="k">Jewellery in fits</span>${habit("jewelry",[["auto","Yes"],["never","No"]])}</div>
+      <div class="rowi"><span class="k">Out of the house</span><span class="row" style="gap:6px"><select id="oS" aria-label="From">${hrs.map(h=>`<option value="${h}" ${h===st.outStart?"selected":""}>${h}:00</option>`).join("")}</select><span class="muted">–</span><select id="oE" aria-label="Until">${hrs.map(h=>`<option value="${h}" ${h===st.outEnd?"selected":""}>${h}:00</option>`).join("")}</select></span></div>
+      <div class="rowi"><div><div class="k">You run</div><div class="h">${st.thermal>0?`cold: dressed ${st.thermal}° warmer`:st.thermal<0?`warm: dressed ${-st.thermal}° lighter`:"neutral"}</div></div>
+        <div class="stepper"><button type="button" id="thMinus" aria-label="Dress lighter">−</button><span class="tnum" style="min-width:34px;text-align:center">${st.thermal>0?"+":""}${st.thermal||0}°</span><button type="button" id="thPlus" aria-label="Dress warmer">+</button></div></div>
+    </div></section>
+
+    <section><div class="group-title label">App</div><div class="group">
+      <button type="button" class="rowi" id="locBtn"><div><div class="k">Location</div><div class="h">${S.loc?esc(S.loc.name)+(S.loc.source==="gps"?" · GPS":""):"Not set"}</div></div><span class="chev"></span></button>
+      <button type="button" class="rowi" id="regBtn"><div><div class="k">Shopping region</div><div class="h">${esc(region().name)}${st.region==="auto"?" · automatic":""}</div></div><span class="chev"></span></button>
+      <div class="rowi stackrow"><div class="row between"><div><div class="k">Fashion AI</div><div class="h">${aiState==="ready"?`On · ${S.items.filter(i=>i.emb).length}/${S.items.length} pieces analysed · offline`:aiState==="loading"?`Downloading ${Math.round((AI.progress||0)*100)}%`:aiState==="error"?"Download failed":"Off · one-time ~150 MB download"}</div></div>
+        ${aiState==="ready"?`<label class="row" style="gap:8px"><span class="h">Auto-tag</span><input type="checkbox" class="switch" id="autoTag" ${st.autoTag?"checked":""}></label>`:aiState==="loading"?"":`<button type="button" class="btn accent" id="aiOn">${aiState==="error"?"Retry":"Turn on"}</button>`}</div>
+        ${aiState==="loading"?`<div class="progress"><span style="width:${Math.round((AI.progress||0)*100)}%"></span></div>`:""}</div>
+      <div class="rowi"><span class="k">Units</span>${seg("units",[["C","°C"],["F","°F"]],st.units)}</div>
+      <div class="rowi"><span class="k">Theme</span>${seg("theme",[["system","Auto"],["light","Light"],["dark","Dark"]],st.theme)}</div>
+    </div></section>
+
+    <section><div class="group-title label">Your data · stays on this phone <span id="storeUse"></span></div><div class="group">
+      <button type="button" class="rowi" id="exportBtn"><span class="k">Back up</span><span class="chev"></span></button>
+      <button type="button" class="rowi" id="importBtn"><span class="k">Restore from backup</span><span class="chev"></span></button>
+      <button type="button" class="rowi" id="wipe"><span class="k" style="color:var(--bad)">Delete everything</span></button>
+    </div></section>
+    <p class="label" style="text-align:center">Daily Fit 5 · trends ${esc(D.compiled)}</p>
   </div>`;
-  const ao=$("#aiOn"); if (ao) ao.onclick=()=>{ enableAI(); };
-  const at=$("#autoTag"); if (at) at.onchange=e=>{ st.autoTag=e.target.checked; saveSettings(); };
-  $("#thMinus").onclick=()=>{ st.thermal=Math.max(-5,(st.thermal||0)-1); saveSettings(); S.skipped.clear(); renderSettings(v); };
-  $("#thPlus").onclick=()=>{ st.thermal=Math.min(5,(st.thermal||0)+1); saveSettings(); S.skipped.clear(); renderSettings(v); };
-  $("#resetTaste").onclick=()=>confirmSheet("Forget everything it learned about your taste?","Reset",async()=>{ S.history.pairs={}; S.taste={w:{},n:0}; st.thermal=0; saveSettings(); await saveHistory(); await kvSet("taste",S.taste); render(); toast("Learned taste cleared."); });
-  $("#locBtn").onclick=locationSheet; $("#regBtn").onclick=regionSheet;
-  $("#manual").onchange=e=>{ st.manual=e.target.checked; saveSettings(); };
-  $("#oS").onchange=e=>{ st.outStart=+e.target.value; saveSettings(); };
-  $("#oE").onchange=e=>{ st.outEnd=+e.target.value; saveSettings(); };
-  const prof=(id,key)=>{ $(id).oninput=e=>{ pr[key]=e.target.value; saveProfile(); }; };
-  prof("#pH","height"); prof("#pW","weight"); prof("#pHair","hair"); prof("#pJ","jewelry");
-  $("#avoidSkinny").onchange=e=>{ st.avoidSkinny=e.target.checked; saveSettings(); };
-  for (const k of ["headwear","gloves","jewelry"]) v.querySelectorAll(`[data-m-${k}]`).forEach(b=>b.onclick=()=>{ st[k]=b.getAttribute(`data-m-${k}`); saveSettings(); S.skipped.clear(); renderSettings(v); });
-  v.querySelectorAll("[data-units]").forEach(b=>b.onclick=()=>{ st.units=b.dataset.units; saveSettings(); renderSettings(v); });
-  v.querySelectorAll("[data-theme]").forEach(b=>b.onclick=()=>{ st.theme=b.dataset.theme; saveSettings(); applyTheme(); renderSettings(v); });
-  $("#mixP").onchange=e=>{ st.mixPatterns=e.target.checked; saveSettings(); };
-  $("#rest").onchange=e=>{ st.avoidRepeatDays=+e.target.value; saveSettings(); };
-  $("#exportBtn").onclick=exportData; $("#importBtn").onclick=()=>$("#fileImport").click();
-  $("#wipe").onclick=()=>confirmSheet("Delete your whole closet, diary, history and settings from this phone?","Delete everything",async()=>{ await kvClear(); location.reload(); });
-  if (navigator.storage&&navigator.storage.estimate) navigator.storage.estimate().then(e=>{ const el=$("#storeUse"); if (el) el.textContent=`${(e.usage/1048576).toFixed(0)} MB used`; }).catch(()=>{});
+  const on=(id,ev,fn)=>{ const el=$(id); if (el) el[ev]=fn; };
+  on("#pName","oninput",e=>{ pr.name=e.target.value; saveProfile(); $("#avatarBtn").innerHTML=avatarHTML(); v.querySelector(".avatar.lg").innerHTML=avatarHTML(); });
+  const prof=(id,key)=>on(id,"oninput",e=>{ pr[key]=e.target.value; saveProfile(); });
+  prof("#pH","height"); prof("#pW","weight"); prof("#pHair","hair");
+  v.querySelectorAll("[data-jp]").forEach(b=>b.onclick=()=>{ pr.jewelry=b.dataset.jp; saveProfile(); S.skipped.clear(); renderYou(v); });
+  v.querySelectorAll("[data-skinny]").forEach(b=>b.onclick=()=>{ st.avoidSkinny=b.dataset.skinny==="avoid"; saveSettings(); S.skipped.clear(); renderYou(v); });
+  for (const k of ["headwear","gloves","jewelry"]) v.querySelectorAll(`[data-m-${k}]`).forEach(b=>b.onclick=()=>{ st[k]=b.getAttribute(`data-m-${k}`); saveSettings(); S.skipped.clear(); renderYou(v); });
+  on("#oS","onchange",e=>{ st.outStart=+e.target.value; saveSettings(); });
+  on("#oE","onchange",e=>{ st.outEnd=+e.target.value; saveSettings(); });
+  on("#thMinus","onclick",()=>{ st.thermal=Math.max(-5,(st.thermal||0)-1); saveSettings(); S.skipped.clear(); renderYou(v); });
+  on("#thPlus","onclick",()=>{ st.thermal=Math.min(5,(st.thermal||0)+1); saveSettings(); S.skipped.clear(); renderYou(v); });
+  on("#resetTaste","onclick",()=>confirmSheet("Reset your Style DNA? The app forgets which pieces and looks you prefer.","Reset",async()=>{ S.history.pairs={}; S.taste={w:{},n:0}; st.thermal=0; saveSettings(); await saveHistory(); await kvSet("taste",S.taste); render(); toast("Style DNA reset."); }));
+  on("#locBtn","onclick",locationSheet); on("#regBtn","onclick",regionSheet);
+  on("#aiOn","onclick",()=>enableAI());
+  on("#autoTag","onchange",e=>{ st.autoTag=e.target.checked; saveSettings(); });
+  v.querySelectorAll("[data-units]").forEach(b=>b.onclick=()=>{ st.units=b.dataset.units; saveSettings(); renderYou(v); });
+  v.querySelectorAll("[data-theme]").forEach(b=>b.onclick=()=>{ st.theme=b.dataset.theme; saveSettings(); applyTheme(); renderYou(v); });
+  on("#exportBtn","onclick",exportData); on("#importBtn","onclick",()=>$("#fileImport").click());
+  on("#wipe","onclick",()=>confirmSheet("Delete your whole closet, diary, history and settings from this phone?","Delete everything",async()=>{ await kvClear(); location.reload(); }));
+  if (navigator.storage&&navigator.storage.estimate) navigator.storage.estimate().then(e=>{ const el=$("#storeUse"); if (el) el.textContent=`· ${(e.usage/1048576).toFixed(0)} MB`; }).catch(()=>{});
 }
-if (AI) AI.subscribe(debounce(()=>{ if (S.ready && S.tab==="settings" && $("#sheet").hidden) renderSettings($("#view")); },250));
+if (AI) AI.subscribe(debounce(()=>{ if (S.ready && S.tab==="you" && $("#sheet").hidden) renderYou($("#view")); },250));
 
 /* ================= backup ================= */
 const blobToDataURL=b=>new Promise(res=>{ if (!b||typeof b==="string") return res(b||""); const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(b); });
@@ -1163,10 +1171,10 @@ function onboarding(step=0){
     ${S.loc?`<p class="small">Location: <strong>${esc(S.loc.name)}</strong></p><button type="button" class="btn accent block" id="next2">Continue</button>`:""}`;
   if (step===2) html=`${dots}<h1>Your style</h1>
     <div class="field"><span class="label">Headwear</span>${seg("ob-hw",[["auto","By weather"],["always","Always"],["never","Never"]],S.settings.headwear)}</div>
-    <label class="toggle"><span><strong>No skinny fits</strong></span><input type="checkbox" id="obSkinny" ${S.settings.avoidSkinny?"checked":""}></label>
+    <label class="toggle"><span><strong>No skinny fits</strong></span><input type="checkbox" class="switch" id="obSkinny" ${S.settings.avoidSkinny?"checked":""}></label>
     <div class="two"><div class="field"><label class="label" for="obH">Height</label><input type="text" id="obH" value="${esc(S.profile.height)}"></div>
       <div class="field"><label class="label" for="obJ">Jewellery</label><input type="text" id="obJ" value="${esc(S.profile.jewelry)}"></div></div>
-    <label class="toggle"><span><strong>Fashion AI</strong><br><span class="muted small">Auto-tags photos, recreates looks, learns from mirror pics. One-time ~150 MB download, then offline.</span></span><input type="checkbox" id="obAI" ${S.settings.aiEnabled?"checked":""}></label>
+    <label class="toggle"><span><strong>Fashion AI</strong><br><span class="muted small">Auto-tags photos, recreates looks, learns from mirror pics. One-time ~150 MB download, then offline.</span></span><input type="checkbox" class="switch" id="obAI" ${S.settings.aiEnabled?"checked":""}></label>
     <button type="button" class="btn accent block" id="next">Continue</button>`;
   if (step===3) html=`${dots}<h1>Add your first pieces</h1>
     <p>Start with what you wear most: two or three tops, trousers, shoes, a jacket, and your everyday jewellery. Pick several photos at once and tag them one after another.</p>
@@ -1192,6 +1200,8 @@ function onboarding(step=0){
 
 /* ================= boot ================= */
 document.querySelectorAll("nav.tabs button").forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
+$("#addBtn").onclick=()=>addMenu();
+$("#avatarBtn").onclick=()=>setTab("you");
 window.addEventListener("online", ()=>fetchWeather());
 document.addEventListener("visibilitychange", ()=>{ if (document.visibilityState==="visible"&&S.ready){ fetchWeather(); if (S.tab==="today"&&$("#sheet").hidden) render(); } });
 window.addEventListener("popstate", ()=>{ if (!$("#sheet").hidden){ const wasOnboarding=!S.onboarded; closeSheet(); if (wasOnboarding){ S.onboarded=true; kvSet("onboarded",true); } } });
@@ -1206,7 +1216,7 @@ render();
     S.diary=diary||[]; S.taste=taste||{w:{},n:0};
   }catch{ toast("This browser blocked storage, so nothing will be saved. Open Daily Fit as an installed app."); }
   applyTheme();
-  const h=location.hash.slice(1); if (["today","closet","shop","settings"].includes(h)) { S.tab=h; document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-current",String(b.dataset.tab===h))); }
+  let h=location.hash.slice(1); if (h==="settings") h="you"; if (["today","closet","shop","you"].includes(h)) { S.tab=h; document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-current",String(b.dataset.tab===h))); }
   S.ready=true; render();
   if (!S.onboarded) onboarding(0);
   fetchWeather();
