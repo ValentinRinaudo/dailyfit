@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Daily Fit</title>
+<meta name="description" content="Daily streetwear outfits from your own closet, planned for today's weather.">
+<meta name="theme-color" content="#111111">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="wordmark">Daily Fit</div>
+      <div class="label" id="dateLabel"></div>
+    </div>
+    <div class="row" id="topActions"></div>
+  </header>
+  <main id="view" aria-live="polite"></main>
+</div>
+
+<nav class="tabs" aria-label="Sections"><div class="in">
+  <button type="button" data-tab="today" aria-current="true"><span class="ico" aria-hidden="true">◐</span>Today</button>
+  <button type="button" data-tab="closet"><span class="ico" aria-hidden="true">▤</span>Closet</button>
+  <button type="button" data-tab="shop"><span class="ico" aria-hidden="true">◇</span>Shop</button>
+  <button type="button" data-tab="settings"><span class="ico" aria-hidden="true">≡</span>Settings</button>
+</div></nav>
+
+<input type="file" id="fileCam" accept="image/*" capture="environment" hidden>
+<input type="file" id="fileLib" accept="image/*" multiple hidden>
+<input type="file" id="fileImport" accept="application/json,.json" hidden>
+<div id="sheet" class="sheet" hidden></div>
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
