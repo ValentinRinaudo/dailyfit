@@ -1,0 +1,36 @@
+name: Trend scan
+# Runs once a day for free on GitHub's servers: reads streetwear feeds, tags the images with FashionCLIP,
+# and commits data/trends.json, which the Daily Fit app downloads.
+on:
+  schedule:
+    - cron: "17 21 * * *"   # 06:17 in Seoul
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: trends
+  cancel-in-progress: false
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Cache the fashion model
+        uses: actions/cache@v4
+        with:
+          path: trends-cache
+          key: fashionclip-q8-v1
+      - name: Install the model runtime
+        run: npm install --no-save --no-package-lock @huggingface/transformers@3.7.5
+      - name: Scan trends
+        run: node trends-job.mjs
+      - name: Save results
+        run: |
+          git config user.name "daily-fit-trends"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/trends.json data/trend-history.json
+          git diff --cached --quiet || (git commit -m "Trend scan $(date -u +%F)" && git push)
