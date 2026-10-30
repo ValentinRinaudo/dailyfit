@@ -82,7 +82,9 @@ function blobURL(key, blob){ if (!blob) return ""; if (typeof blob==="string") r
 const thumbURL=it=>blobURL(it.id+":t", it.thumb||it.cut||it.photo);
 const bigURL=it=>blobURL(it.id+(it.cut&&!it.useOriginal?":c":":p"), it.cut&&!it.useOriginal?it.cut:(it.photo||it.thumb));
 function dropURLs(id){ for (const k of [":t",":c",":p"]) { const u=urlCache.get(id+k); if (u){ URL.revokeObjectURL(u); urlCache.delete(id+k); } } }
-function loadImage(f){ return new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); }); }
+/* phone photos are decoded off the main thread (createImageBitmap), with an <img> fallback */
+async function loadImage(f){ if (window.createImageBitmap){ try{ return await createImageBitmap(f,{imageOrientation:"from-image"}); }catch{} }
+  return new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); }); }
 function canvasFrom(src,max){ const w=src.naturalWidth||src.width, h=src.naturalHeight||src.height, r=Math.min(1,max/Math.max(w,h)), c=document.createElement("canvas");
   c.width=Math.max(1,Math.round(w*r)); c.height=Math.max(1,Math.round(h*r)); c.getContext("2d").drawImage(src,0,0,c.width,c.height); return c; }
 const toBlob=(c,type="image/jpeg",q=.84)=>new Promise(res=>c.toBlob(b=>res(b),type,q));
@@ -328,9 +330,10 @@ function generate(c,{n=1400,seed=1,locks=S.locks,extra=[],force=null}={}){
   cands.sort((a,b)=>b.score-a.score);
   return {p,missing,soft,cands};
 }
+const FEED_N=4;
 const DIV_W={top:1,layer:.9,outer:1,bottom:1,shoes:.5,hat:.3,gloves:.2,bag:.2,eyes:.1,belt:.1,neck:.15,wrist:.15,hand:.15,ear:.1};
-function selectDiverse(cands,k,chosen=[]){
-  const use=new Map(), out=[], taken=new Set(chosen.map(c=>c.key)); for (const c of chosen) for (const s of SLOTS) if (c[s]) use.set(c[s].id,(use.get(c[s].id)||0)+1);
+function selectDiverse(cands,k,chosen=[],prior=[]){
+  const use=new Map(), out=[], taken=new Set(chosen.map(c=>c.key)); for (const c of [...chosen,...prior]) for (const s of SLOTS) if (c[s]) use.set(c[s].id,(use.get(c[s].id)||0)+1);
   let pool=cands.filter(c=>!taken.has(c.key)&&!S.feedSkipped?.has(c.key));
   while (out.length<k&&pool.length){
     let bi=-1,bv=-1e9; const lim=Math.min(pool.length,500);
@@ -341,17 +344,21 @@ function selectDiverse(cands,k,chosen=[]){
 }
 function feed(){
   const c=conditions();
-  const key=[dateKey(S.day),S.day,Math.round(effTemp(c)/2),c.wet,c.snow,c.sunny,JSON.stringify(S.locks),S.closetV,S.shuffle,S.settings.headwear,S.settings.gloves,S.settings.jewelry,S.settings.avoidSkinny,S.settings.thermal].join("|");
+  const key=[dateKey(S.day),S.day,Math.round(effTemp(c)/2),c.wet,c.snow,c.sunny,JSON.stringify(S.locks),S.closetV,S.settings.headwear,S.settings.gloves,S.settings.jewelry,S.settings.avoidSkinny,S.settings.thermal].join("|");
   if (S.feed&&S.feed.key===key) return S.feed;
-  const g=generate(c,{seed:hashStr(key)});
+  const g=generate(c,{seed:hashStr(key),n:900});
   S.feedSkipped=new Set();
-  let list=selectDiverse(g.cands,9);
+  let list=selectDiverse(g.cands,FEED_N);
   /* a planned fit for today goes first */
-  if (S.plan&&S.plan.date===dateKey(S.day)){ const o=outfitFromIds(S.plan.ids); if (o.top&&o.bottom&&o.shoes&&partsOf(o).every(i=>!i.inWash)){ const r=rescore(o); r.planned=true; list=[r,...list.filter(x=>x.key!==r.key)].slice(0,9); } }
-  S.feed={key,c,p:g.p,missing:g.missing,soft:g.soft,cands:g.cands,list,shown:9};
+  if (S.plan&&S.plan.date===dateKey(S.day)){ const o=outfitFromIds(S.plan.ids); if (o.top&&o.bottom&&o.shoes&&partsOf(o).every(i=>!i.inWash)){ const r=rescore(o); r.planned=true; list=[r,...list.filter(x=>x.key!==r.key)].slice(0,FEED_N); } }
+  S.feed={key,c,p:g.p,missing:g.missing,soft:g.soft,cands:g.cands,list,seen:new Set(list.map(o=>o.key)),round:1};
   return S.feed;
 }
-function moreFits(){ const F=S.feed; if (!F) return; const add=selectDiverse(F.cands,6,F.list); F.list.push(...add); render(); if (!add.length) toast("That's every good combination for today. Add pieces for more."); }
+/* a fresh set of 4 from the same pool: no re-computation, and nothing you've just seen comes back until the pool runs dry */
+function newSet(){ const F=S.feed; if (!F) return;
+  const good=F.cands.filter(o=>o.score>=F.cands[0].score-3.5);
+  let pool=good.filter(o=>!F.seen.has(o.key)); if (pool.length<FEED_N){ F.seen=new Set(); pool=good; toast("You've seen every strong combination, starting over."); }
+  F.list=selectDiverse(pool,FEED_N,[],F.list); F.list.forEach(o=>F.seen.add(o.key)); F.round++; }
 function rescore(o){ const c=conditions(); return {...o,key:keyOf(o),...scoreOutfit(o,{c,p:weatherPlan(c)})}; }
 function outfitFromIds(ids){ const o={}; for (const id of ids){ const it=S.items.find(i=>i.id===id); if (!it) continue; const s=slotOf(it); if (!o[s]) o[s]=it; } return o; }
 
@@ -369,7 +376,7 @@ async function analyzePiece(img, it, onStep){
   const photoC=canvasFrom(img,1100); it.photo=await toBlob(photoC,"image/jpeg",.85);
   let cut=null;
   if (aiReady()&&AI.canCutout){ onStep&&onStep("Cutting out the background…"); try{ cut=await AI.removeBackground(it.photo); }catch{} }
-  if (cut){ it.cut=await cutBlob(cut,800); it.thumb=await cutBlob(cut,360); } else { it.thumb=await toBlob(canvasFrom(img,360),"image/jpeg",.8); }
+  if (cut){ it.cut=await cutBlob(cut,800); it.thumb=await cutBlob(cut,480); } else { it.thumb=await toBlob(canvasFrom(img,480),"image/jpeg",.82); }
   it.cutTried=true;
   if (aiReady()){
     onStep&&onStep("Recognising the piece…");
@@ -389,7 +396,7 @@ async function backfill(){
     for (const it of S.items.filter(i=>!i.virtual)){
       let touched=false;
       if (AI.canCutout&&!it.cutTried&&(it.photo||it.thumb)){ try{ const cut=await AI.removeBackground(it.photo||it.thumb);
-          if (cut){ it.cut=await cutBlob(cut,800); it.thumb=await cutBlob(cut,360); dropURLs(it.id);
+          if (cut){ it.cut=await cutBlob(cut,800); it.thumb=await cutBlob(cut,480); dropURLs(it.id); refreshThumb(it);
             if (!it.colorUser&&it.cat!=="jewelry"){ const emb=it.emb||await AI.embedImage(it.photo||it.thumb); it.emb=emb; const col=await analyzeColor(cut,true,emb); const old=it.colorName||COL.nameHex(it.color);
               if (col.name!==old){ S.colorReview.push({id:it.id,oldHex:it.color,oldName:old}); changed++; } it.color=col.hex; it.colorName=col.name; } }
         }catch{} it.cutTried=true; touched=true; }
@@ -398,8 +405,20 @@ async function backfill(){
     }
     for (const e of S.photos.filter(e=>!e.emb&&e.photo)){ try{ e.emb=await AI.embedImage(e.thumb||e.photo); await photoPut(e); }catch{} }
   } finally { S.aiBusy=false; }
-  if (changed){ await kvSet("colorReview",S.colorReview); toast(`Cutouts done. Colours changed on ${changed} piece${changed>1?"s":""}.`,{label:"Review",fn:colorReviewSheet}); }
-  closetChanged(); recomputeStyle(); render();
+  recomputeStyle(); S.gapCache=null;
+  if (changed){ closetChanged(); await kvSet("colorReview",S.colorReview); toast(`Cutouts done. Colours changed on ${changed} piece${changed>1?"s":""}.`,{label:"Review",fn:colorReviewSheet}); if (S.tab==="closet"&&$("#sheet").hidden) render(); }
+}
+/* swap a piece's picture in place wherever it's on screen, without re-rendering the page */
+function refreshThumb(it){ const u=thumbURL(it); document.querySelectorAll(`img[data-iid="${CSS.escape(it.id)}"]`).forEach(im=>{ im.src=u; im.parentElement.classList.toggle("cut",!!(it.cut&&!it.useOriginal)); }); }
+/* old pieces saved without a small thumbnail: make one, a few at a time when the phone is idle */
+function ensureThumbs(){
+  const todo=S.items.filter(i=>(!i.thumb||i.thumb.size>180e3)&&(i.photo||i.thumb)); if (!todo.length) return;
+  const idle=window.requestIdleCallback||(f=>setTimeout(f,200));
+  const step=()=>idle(async()=>{ const it=todo.shift(); if (!it) return;
+    try{ const bm=await createImageBitmap(it.cut||it.thumb||it.photo); const c=canvasFrom(bm,480); bm.close&&bm.close(); it.thumb=it.cut?await cutBlob(c,480):await toBlob(c,"image/jpeg",.82);
+      await itemPut(it); const u=urlCache.get(it.id+":t"); if (u){ URL.revokeObjectURL(u); urlCache.delete(it.id+":t"); } refreshThumb(it); }catch{}
+    step(); });
+  step();
 }
 function recomputeStyle(){
   if (!AI) return;
@@ -409,7 +428,7 @@ function recomputeStyle(){
   const embs=S.items.filter(i=>i.emb&&CLOTH.includes(i.cat));
   closetBase.style=S.styleVec&&embs.length?embs.reduce((a,i)=>a+AI.cos(i.emb,S.styleVec),0)/embs.length:null;
 }
-function regionCanvas(img,y0,y1,x0=.12,x1=.88){ const W=img.naturalWidth,H=img.naturalHeight,c=document.createElement("canvas");
+function regionCanvas(img,y0,y1,x0=.12,x1=.88){ const W=img.naturalWidth||img.width,H=img.naturalHeight||img.height,c=document.createElement("canvas");
   const b={x:Math.round(W*x0),y:Math.round(H*y0),w:Math.max(1,Math.round(W*(x1-x0))),h:Math.max(1,Math.round(H*(y1-y0)))}; const sc=Math.min(1,448/Math.max(b.w,b.h));
   c.width=Math.max(1,Math.round(b.w*sc)); c.height=Math.max(1,Math.round(b.h*sc)); c.getContext("2d").drawImage(img,b.x,b.y,b.w,b.h,0,0,c.width,c.height); return c; }
 async function readLook(img){
@@ -439,9 +458,10 @@ const IC={
   cal:'<svg class="icon" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>',
   person:'<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>'
 };
-function phHTML(it,{badge="",big=false}={}){
-  const src=big?bigURL(it):thumbURL(it), cut=!!(it.cut&&!it.useOriginal);
-  return `<div class="ph${cut?" cut":""}">${src?`<img src="${esc(src)}" alt="" loading="lazy" decoding="async">`:it.virtual||!src?ART.svg(it,hexOf(it)):""}${badge}${it.inWash?'<span class="badge wash">Wash</span>':it.pinned?'<span class="badge">Pin</span>':""}</div>`;
+function phHTML(it,{badge="",big=false,lazy=false}={}){
+  const src=big?bigURL(it):thumbURL(it), cut=!!(it.cut&&!it.useOriginal), bg=it.virtual?"":` style="--sw:${hexOf(it)}"`;
+  const light=cut&&it.cat!=="jewelry"&&["white","cream","light grey","beige"].includes(cname(it));
+  return `<div class="ph${cut?" cut":""}${light?" light":""}"${bg}>${src?`<img data-iid="${esc(it.id)}" src="${esc(src)}" alt=""${lazy?' loading="lazy"':""} decoding="async">`:it.virtual||!src?ART.svg(it,hexOf(it)):""}${badge}${it.inWash?'<span class="badge wash">Wash</span>':it.pinned?'<span class="badge">Pin</span>':""}</div>`;
 }
 const seg=(name,opts,cur,extra="")=>`<div class="seg ${extra}" role="group">${opts.map(([v,l])=>`<button type="button" data-${name}="${esc(v)}" aria-pressed="${String(v)===String(cur)}">${esc(l)}</button>`).join("")}</div>`;
 const fmtDay=t=>new Date(t).toLocaleDateString(undefined,{weekday:"short",day:"numeric",month:"short"});
@@ -481,7 +501,9 @@ function collageHTML(o,i,interactive=true,big=false){
   const slot=(k,cls)=>{ if (!o[k]) return ""; const inner=`${phHTML(o[k],{big,badge:S.locks[k]===o[k].id?'<span class="badge lock">Locked</span>':o[k].virtual?'<span class="badge new">New</span>':""})}<span class="tag">${SLOT_LABEL[k]}</span>`;
     return interactive?`<button type="button" class="piece ${cls}" data-piece="${i}:${k}" aria-label="${esc(SLOT_LABEL[k]+": "+o[k].name)}">${inner}</button>`:`<div class="piece ${cls}" title="${esc(o[k].name)}">${inner}</div>`; };
   const acc=["hat","gloves","bag","eyes","belt","neck","wrist","hand","ear"].filter(k=>o[k]);
-  return `<div class="collage">${ups.map(k=>slot(k,ups.length===1?"wide":"")).join("")}${slot("bottom","wide")}${slot("shoes","wide")}</div>${acc.length?`<div class="collage acc">${acc.map(k=>slot(k,"")).join("")}</div>`:""}`;
+  if (big){ const core=[...ups,"bottom","shoes"].filter(k=>o[k]); const head=acc.filter(k=>k==="hat"||k==="gloves"), small=acc.filter(k=>k!=="hat"&&k!=="gloves");
+    return `<div class="collage grid3">${[...core,...head].map(k=>slot(k,"")).join("")}</div>${small.length?`<div class="collage acc">${small.map(k=>slot(k,"")).join("")}</div>`:""}`; }
+  return `<div class="collage">${ups.map(k=>slot(k,ups.length===1?"full":ups.length===2?"wide":"")).join("")}${slot("bottom","wide")}${slot("shoes","wide")}</div>${acc.length?`<div class="collage acc">${acc.map(k=>slot(k,"")).join("")}</div>`:""}`;
 }
 function miniCollage(o){ const ps=[o.outer||o.layer||o.top, o.bottom, o.shoes, o.outer&&o.layer?o.layer:(o.outer||o.layer)?o.top:(o.hat||o.bag||jewelOf(o)[0])].filter(Boolean).slice(0,4);
   return `<div class="mini4">${ps.map(it=>phHTML(it)).join("")}</div>`; }
@@ -499,7 +521,7 @@ function renderToday(v){
         ${S.loc&&fc&&S.day===0?`<button type="button" class="btn icon-only quiet" id="wxRefresh" aria-label="Refresh forecast">${IC.refresh}</button>`:""}</div>
       ${hours?`<div class="hours">${hours}</div>`:""}
       ${!fc?`<input type="range" id="tempIn" min="-20" max="38" step="1" value="${st.manualTemp}" aria-label="Temperature"><div class="row">${seg("rain",[[0,"Dry"],[1,"Rain or snow"]],st.manualRain?1:0)}</div>`:""}
-      <div class="wx-note"><span>${esc(p.note)}</span>${S.loc&&fc?`<button type="button" class="linkbtn" id="manualOn">Set it myself</button>`:st.manual&&S.loc?`<button type="button" class="linkbtn" id="manualOff">Use forecast</button>`:!S.loc?`<button type="button" class="linkbtn" id="setLoc">Set location</button>`:""}</div>
+      <div class="wx-note"><span>${esc(p.note)}</span>${S.loc&&fc?`<button type="button" class="linkbtn" id="manualOn">Set it myself</button>`:st.manual&&S.loc?`<button type="button" class="linkbtn" id="manualOff">Use forecast</button>`:!S.loc?`<button type="button" class="linkbtn" id="setLoc">Set location</button>`:S.wxState==="error"||S.wxState==="offline"?`<button type="button" class="linkbtn" id="wxRetry">Retry forecast</button>`:""}</div>
     </section>
     ${pend?rateCardHTML(pend):""}
     <div id="fits"></div>
@@ -507,31 +529,36 @@ function renderToday(v){
       <button type="button" class="feature" id="recreateBtn"><span class="ficon">${IC.spark}</span><span><strong>Recreate an inspo fit</strong><span class="h">Pick a photo you like; it's rebuilt from your clothes.</span></span></button>
       <button type="button" class="feature" id="mirrorBtn"><span class="ficon">${IC.mirror}</span><span><strong>Mirror pic</strong><span class="h">Log what you wore and rate it.</span></span></button></div>`:""}
   </div>`;
-  const fits=$("#fits");
-  if (!S.items.length) fits.innerHTML=needsHTML();
-  else if (F.missing.length) fits.innerHTML=`<div class="notice solid">For ${deg(c.temp)} you still need ${F.missing.map(esc).join(", ")}. The Shop tab suggests what to get.</div>`;
-  else if (!F.list.length) fits.innerHTML=`<div class="notice solid">Nothing in your closet works together for this weather yet. Check what's in the wash.</div>`;
-  else {
-    const hero=F.list[0], rest=F.list.slice(1);
-    fits.innerHTML=`<div class="stack">
-      ${F.soft.length?`<div class="notice">${F.soft.map(esc).join(" ")}</div>`:""}
-      ${lockN?`<div class="row between notice"><span>${lockN} piece${lockN>1?"s":""} locked in every fit</span><button type="button" class="linkbtn" id="unlock">Unlock</button></div>`:""}
-      ${heroHTML(hero)}
-      ${rest.length?`<div class="row between"><h2>More fits</h2><button type="button" class="linkbtn" id="shuffle">${IC.refresh} New set</button></div>
-      <div class="fitgrid">${rest.map((o,j)=>`<button type="button" class="fitcard" data-open="${j+1}">${miniCollage(o)}<span class="fc-title">${esc(titleOf(o))}</span></button>`).join("")}</div>
-      <button type="button" class="btn quiet block" id="moreBtn">Show more fits</button>`:""}
-    </div>`;
-    bindHero(fits); fits.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>fitSheet(+b.dataset.open));
-  }
+  renderFits(F,c);
   const on=(id,fn)=>{ const el=$(id); if (el) el.onclick=fn; };
   const ti=$("#tempIn"); if (ti){ ti.oninput=e=>{ st.manualTemp=+e.target.value; $("#tempOut").textContent=deg(st.manualTemp); }; ti.onchange=()=>{ saveSettings(); render(); }; }
   v.querySelectorAll("[data-rain]").forEach(b=>b.onclick=()=>{ st.manualRain=b.dataset.rain==="1"; saveSettings(); render(); });
   v.querySelectorAll("[data-day]").forEach(b=>b.onclick=()=>{ S.day=+b.dataset.day; buzz(); render(); });
-  on("#wxRefresh",()=>fetchWeather(true)); on("#setLoc",locationSheet);
+  on("#wxRefresh",()=>fetchWeather(true)); on("#wxRetry",()=>fetchWeather(true)); on("#setLoc",locationSheet);
   on("#manualOn",()=>{ st.manual=true; st.manualTemp=c.temp; saveSettings(); render(); }); on("#manualOff",()=>{ st.manual=false; saveSettings(); render(); });
-  on("#shuffle",()=>{ S.shuffle++; buzz(); render(); }); on("#moreBtn",moreFits); on("#unlock",()=>{ S.locks={}; render(); });
+  on("#unlock",()=>{ S.locks={}; render(); });
   on("#recreateBtn",startRecreate); on("#mirrorBtn",()=>startMirror());
   const rc=v.querySelector(".ratecard"); if (rc) bindRateCard(rc,pend);
+}
+/* only the fits area re-renders when you flip through fits, so it stays instant */
+function renderFits(F,c){
+  const fits=$("#fits"); if (!fits) return;
+  if (!S.items.length){ fits.innerHTML=needsHTML(); return; }
+  if (F.missing.length){ fits.innerHTML=`<div class="notice solid">For ${deg(c.temp)} you still need ${F.missing.map(esc).join(", ")}. The Shop tab suggests what to get.</div>`; return; }
+  if (!F.list.length){ fits.innerHTML=`<div class="notice solid">Nothing in your closet works together for this weather yet. Check what's in the wash.</div>`; return; }
+  const lockN=Object.keys(S.locks).length, hero=F.list[0];
+  fits.innerHTML=`<div class="stack">
+    ${F.soft.length?`<div class="notice">${F.soft.map(esc).join(" ")}</div>`:""}
+    ${lockN?`<div class="row between notice"><span>${lockN} piece${lockN>1?"s":""} locked in every fit</span><button type="button" class="linkbtn" id="unlock">Unlock</button></div>`:""}
+    ${heroHTML(hero)}
+    ${F.list.length>1?`<div class="row between"><span class="label">Other options</span><button type="button" class="linkbtn" id="shuffle">${IC.refresh} New fits</button></div>
+    <div class="fitgrid">${F.list.slice(1).map((o,j)=>`<button type="button" class="fitcard" data-open="${j+1}" aria-label="Show ${esc(titleOf(o))}">${miniCollage(o)}<span class="fc-title">${esc(titleOf(o))}</span></button>`).join("")}</div>`:
+    `<div class="row between"><span class="muted small">That's the only strong fit for today with your closet.</span><button type="button" class="linkbtn" id="shuffle">${IC.refresh} Retry</button></div>`}
+  </div>`;
+  bindHero(fits);
+  fits.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>{ const i=+b.dataset.open; [F.list[0],F.list[i]]=[F.list[i],F.list[0]]; buzz(); renderFits(F,c); });
+  const sh=$("#shuffle"); if (sh) sh.onclick=()=>{ newSet(); buzz(); renderFits(F,c); };
+  const ul=$("#unlock"); if (ul) ul.onclick=()=>{ S.locks={}; render(); };
 }
 function heroHTML(o){
   const saved=S.saved.some(f=>f.key===o.key), tomorrow=S.day===1;
@@ -552,21 +579,6 @@ function bindHero(root){
   root.querySelectorAll("[data-save]").forEach(b=>b.onclick=()=>saveFit(S.feed.list[+b.dataset.save]));
   root.querySelectorAll("[data-piece]").forEach(b=>b.onclick=()=>{ const [i,slot]=b.dataset.piece.split(":"); pieceSheet(+i,slot); });
 }
-function fitSheet(i){
-  const o=S.feed.list[i]; if (!o) return; const saved=S.saved.some(f=>f.key===o.key), tomorrow=S.day===1;
-  const p=openSheet(`<div class="row between"><h2>${esc(titleOf(o))}</h2><button type="button" class="btn quiet" id="x">Close</button></div>
-    ${collageHTML(o,i,true,true)}
-    ${o.tags.length?`<div class="chips">${o.tags.map(t=>`<span class="chip ${t.c}">${esc(t.t)}</span>`).join("")}</div>`:""}
-    <div class="look-actions three"><button type="button" class="btn icon-only quiet" id="fsSkip" aria-label="Not this one">${IC.x}</button>
-      <button type="button" class="btn icon-only quiet" id="fsSave" aria-pressed="${saved}" aria-label="Save">${IC.heart}</button>
-      ${tomorrow?`<button type="button" class="btn accent" id="fsGo">${IC.cal}Plan for tomorrow</button>`:`<button type="button" class="btn accent" id="fsGo">${IC.check}Wear this</button>`}</div>
-    <p class="hint">Tap a piece to swap or lock it.</p>`);
-  p.querySelector("#x").onclick=closeSheet;
-  p.querySelector("#fsSkip").onclick=()=>{ closeSheet(); skipFit(i); };
-  p.querySelector("#fsSave").onclick=()=>{ saveFit(o); closeSheet(); };
-  p.querySelector("#fsGo").onclick=()=>{ closeSheet(); tomorrow?planFit(o):wear(o); };
-  p.querySelectorAll("[data-piece]").forEach(b=>b.onclick=()=>{ const [ii,slot]=b.dataset.piece.split(":"); pieceSheet(+ii,slot); });
-}
 function pieceSheet(i,slot){
   const o=S.feed.list[i]; if (!o) return; const cur=o[slot], c=conditions(), p=weatherPlan(c), P=pools(c,p);
   const alts=(P[slot]||[]).filter(x=>x.id!==cur.id).map(x=>({x,s:rescore({...o,[slot]:x}).score})).sort((a,b)=>b.s-a.s).slice(0,9);
@@ -577,9 +589,9 @@ function pieceSheet(i,slot){
     ${alts.length?`<span class="label">Swap for</span><div class="alt">${alts.map(a=>`<button type="button" class="item" data-alt="${esc(a.x.id)}">${phHTML(a.x)}<span class="nm">${esc(a.x.name)}</span></button>`).join("")}</div>`:`<p class="muted small">Nothing else in your closet fits this slot for this weather.</p>`}`);
   panel.querySelector("#x").onclick=closeSheet;
   panel.querySelector("#lockBtn").onclick=()=>{ if (locked) delete S.locks[slot]; else S.locks[slot]=cur.id; closeSheet(); render(); toast(locked?"Unlocked.":"Locked into every fit."); };
-  const db=panel.querySelector("#dropBtn"); if (db) db.onclick=()=>{ const n={...o}; delete n[slot]; delete S.locks[slot]; S.feed.list[i]=rescore(n); closeSheet(); render(); };
+  const db=panel.querySelector("#dropBtn"); if (db) db.onclick=()=>{ const n={...o}; delete n[slot]; delete S.locks[slot]; S.feed.list[i]=rescore(n); closeSheet(); refreshFits(); };
   panel.querySelector("#editBtn").onclick=()=>{ closeSheet(); openEditor(cur); };
-  panel.querySelectorAll("[data-alt]").forEach(b=>b.onclick=()=>{ const x=S.items.find(it=>it.id===b.dataset.alt); S.feed.list[i]=rescore({...o,[slot]:x}); if (S.locks[slot]) S.locks[slot]=x.id; closeSheet(); render(); buzz(); });
+  panel.querySelectorAll("[data-alt]").forEach(b=>b.onclick=()=>{ const x=S.items.find(it=>it.id===b.dataset.alt); S.feed.list[i]=rescore({...o,[slot]:x}); if (S.locks[slot]){ S.locks[slot]=x.id; closeSheet(); render(); } else { closeSheet(); refreshFits(); } buzz(); });
 }
 function needsHTML(){
   const has=k=>S.items.some(i=>i.cat===k), line=(ok,t)=>`<div class="${ok?"ok":"no"}">${ok?"■":"□"} ${t}</div>`;
@@ -600,11 +612,13 @@ async function wear(o){
   S.feed=null; setTab("today"); toast("Logged. Rate it when you're back.",{label:"Rate now",fn:()=>rateSheet(entry)});
 }
 async function planFit(o){ S.plan={date:dateKey(1),ids:partsOf(o).map(x=>x.id)}; await kvSet("plan",S.plan); buzz(); toast("Planned. It'll be your pick tomorrow morning."); }
-function skipFit(i){ const F=S.feed, o=F.list[i]; if (!o) return; feedback(o,-.5); learn(o.f,0,.6); F.feedSkipped=F.feedSkipped||new Set(); S.feedSkipped.add(o.key);
-  F.list.splice(i,1); const add=selectDiverse(F.cands,1,F.list); F.list.splice(i,0,...add); saveHistory(); render(); }
+function skipFit(i){ const F=S.feed, o=F.list[i]; if (!o) return; feedback(o,-.5); learn(o.f,0,.6); S.feedSkipped.add(o.key);
+  F.list.splice(i,1); let add=selectDiverse(F.cands.filter(c=>!F.seen.has(c.key)),1,F.list); if (!add.length) add=selectDiverse(F.cands,1,F.list);
+  add.forEach(c=>F.seen.add(c.key)); F.list.splice(i,0,...add); saveHistory(); refreshFits(); }
+const refreshFits=()=>{ if (S.tab==="today"&&S.feed) renderFits(S.feed,S.feed.c); else render(); };
 async function saveFit(o){ const ex=S.saved.findIndex(f=>f.key===o.key);
   if (ex>=0){ S.saved.splice(ex,1); toast("Removed from saved fits."); } else { S.saved.unshift({key:o.key,t:Date.now(),slots:Object.fromEntries(SLOTS.filter(k=>o[k]).map(k=>[k,o[k].id]))}); learn(o.f,1,.5); buzz(); toast("Saved. Find it in Closet › Saved."); }
-  await kvSet("saved",S.saved).catch(storageFail); render(); }
+  await kvSet("saved",S.saved).catch(storageFail); refreshFits(); }
 
 /* ================= RATINGS ================= */
 async function rateWear(w,rating,tags=w.tags||[]){
@@ -666,7 +680,7 @@ mirrorIn.onchange=async()=>{
           w={t:Date.now(),ids,temp:conditions(0).temp,rating:null,tags:[],fromMirror:true}; S.history.wear.push(w); } }catch{} }
     if (!w){ w={t:Date.now(),ids:[],temp:conditions(0).temp,rating:null,tags:[],fromMirror:true}; S.history.wear.push(w); }
     if (w.photoId){ await photoDel(w.photoId).catch(()=>{}); S.photos=S.photos.filter(p=>p.id!==w.photoId); }
-    e.wearT=w.t; w.photoId=e.id; await photoPut(e); S.photos.push(e); await saveHistory(); URL.revokeObjectURL(img.src);
+    e.wearT=w.t; w.photoId=e.id; await photoPut(e); S.photos.push(e); await saveHistory(); img.src&&URL.revokeObjectURL(img.src);
     closeSheet(); render(); mirrorPieces(w);
   }catch{ closeSheet(); toast("That photo couldn't be read."); }
 };
@@ -743,7 +757,7 @@ function renderPieces(body){
       <select id="sortSel" aria-label="Sort">${[["new","Newest"],["most","Most worn"],["least","Least worn"],["color","Dark to light"]].map(([k,l])=>`<option value="${k}" ${S.sort===k?"selected":""}>${l}</option>`).join("")}</select></div>`:""}
     ${cats.length>1?seg("f",[["all","All"],...cats.map(c=>[c.k,`${c.n} ${S.items.filter(i=>i.cat===c.k).length}`])],S.filter,"scroll"):""}
     ${wash?`<div class="row between"><span class="muted small">${wash} in the wash</span><button type="button" class="linkbtn" id="allClean">Mark all clean</button></div>`:""}
-    ${list.length?`<div class="grid">${list.map(it=>`<button type="button" class="item" data-id="${esc(it.id)}">${phHTML(it)}<span class="nm">${esc(it.name)}</span><span class="sub">${it.wearCount?`Worn ${it.wearCount}×`:"Not worn yet"}</span></button>`).join("")}</div>`:S.items.length?`<p class="muted">Nothing matches.</p>`:needsHTML()}`;
+    ${list.length?`<div class="grid">${list.map(it=>`<button type="button" class="item" data-id="${esc(it.id)}">${phHTML(it,{lazy:true})}<span class="nm">${esc(it.name)}</span><span class="sub">${it.wearCount?`Worn ${it.wearCount}×`:"Not worn yet"}</span></button>`).join("")}</div>`:S.items.length?`<p class="muted">Nothing matches.</p>`:needsHTML()}`;
   const qi=$("#q"); if (qi) qi.oninput=debounce(()=>{ S.query=qi.value; renderPieces(body); const n=$("#q"); n.focus(); n.setSelectionRange(n.value.length,n.value.length); },180);
   const ss=$("#sortSel"); if (ss) ss.onchange=e=>{ S.sort=e.target.value; renderPieces(body); };
   body.querySelectorAll("[data-f]").forEach(b=>b.onclick=()=>{ S.filter=b.dataset.f; renderPieces(body); });
@@ -770,7 +784,7 @@ function renderWorn(body){
   body.innerHTML=`<div class="stats"><div class="stat"><b>${S.history.wear.length}</b><span>fits worn</span></div><div class="stat"><b>${rated.length}</b><span>rated</span></div><div class="stat"><b>${avg}</b><span>avg rating</span></div></div>
     ${list.slice(0,80).map((w,n)=>{ const ph=photoOf(w); return `<button type="button" class="wornrow" data-wr="${S.history.wear.length-1-n}">
       ${ph?`<div class="wr-ph"><img src="${esc(blobURL(ph.id+":t",ph.thumb||ph.photo))}" alt=""></div>`:""}
-      <div class="wr-body"><div class="row between"><span class="k">${fmtDay(w.t)}<span class="muted small"> · ${w.temp!=null?deg(w.temp):""}</span></span><span class="${w.rating?"stars-sm":"muted small"}">${w.rating?"★".repeat(w.rating):"Rate"}</span></div>
+      <div class="wr-body"><div class="row between"><span class="k">${fmtDay(w.t)}${w.temp!=null?`<span class="muted small"> · ${deg(w.temp)}</span>`:""}</span><span class="${w.rating?"stars-sm":"muted small"}">${w.rating?"★".repeat(w.rating):"Rate"}</span></div>
       ${miniFitHTML(w.ids)}${w.tags&&w.tags.length?`<span class="small muted">${esc(w.tags.join(" · "))}</span>`:""}</div></button>`; }).join("")}`;
   body.querySelectorAll("[data-wr]").forEach(b=>b.onclick=()=>rateSheet(S.history.wear[+b.dataset.wr]));
 }
@@ -810,7 +824,7 @@ async function nextInQueue(){
     it=await analyzePiece(img,it,setBusy);
     if (pr.cat){ Object.assign(it,{cat:pr.cat,kind:pr.kind||it.kind,sub:pr.sub||it.sub,metal:pr.metal||it.metal,warmth:pr.warmth||it.warmth,form:pr.form||it.form,fit:pr.fit||it.fit}); it.ai=null; }
     if (it.cat==="jewelry"&&!it.metal) it.metal="silver";
-    URL.revokeObjectURL(img.src); openEditor(it,true);
+    img.src&&URL.revokeObjectURL(img.src); openEditor(it,true);
   }catch(e){ closeSheet(); toast("That photo couldn't be read. Try a JPG or PNG."); nextInQueue(); }
 }
 const suggestName=it=>{ if (!it.cat) return ""; if (it.cat==="jewelry") return cap(it.metal||"")+" "+((SUBS.jewelry.find(j=>j[0]===it.sub)||["","piece"])[1]).toLowerCase();
@@ -1087,7 +1101,7 @@ render();
   }catch{ toast("This browser blocked storage, so nothing will be saved. Open Daily Fit as an installed app."); }
   applyTheme();
   let h=location.hash.slice(1); if (h==="settings") h="you"; if (["today","closet","shop","you"].includes(h)){ S.tab=h; document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-current",String(b.dataset.tab===h))); }
-  S.ready=true; render();
+  S.ready=true; render(); ensureThumbs();
   if (!S.onboarded) onboarding(0);
   fetchWeather();
   if (S.settings.aiEnabled&&AI) AI.load().then(afterAILoad).catch(()=>{});

@@ -131,7 +131,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .collage.acc .ph{aspect-ratio:1/1}
 .collage.acc .tag{display:none}
 .ph{aspect-ratio:4/5;max-width:100%;background:var(--sunk);overflow:hidden;position:relative;display:grid;place-items:center;border-radius:12px}
-.ph img{width:100%;height:100%;object-fit:cover;animation:fadein .35s var(--ease) both}
+.ph img{width:100%;height:100%;object-fit:cover}
 .ph .sw{position:absolute;right:6px;top:6px;width:12px;height:12px;border-radius:50%;border:2px solid var(--surface)}
 .ph .noimg{font-family:var(--f-mono);font-size:11px;color:var(--muted);text-transform:uppercase}
 .badge{position:absolute;top:6px;left:6px;font-family:var(--f-mono);font-size:10px;padding:1px 6px;border-radius:6px;background:var(--accent);color:var(--accent-ink)}
@@ -302,10 +302,10 @@ button.rowi:last-child{border-bottom:0}
 .look.pick h2{margin:2px 0 0;font-size:20px;line-height:1.15}
 .look-actions.three{grid-template-columns:auto auto 1fr}
 .dayseg{align-self:flex-start}
-.fitgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.fitgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .fitcard{border:0;background:var(--surface);border-radius:var(--r);padding:8px;display:grid;gap:8px;text-align:left;box-shadow:var(--shadow);transition:transform .15s var(--ease)}
 .fitcard:active{transform:scale(.97)}
-.mini4{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.mini4{display:grid;grid-template-columns:1fr 1fr;gap:3px}
 .mini4 .ph{border-radius:8px;aspect-ratio:1/1}
 .fc-title{font-size:12.5px;font-weight:650;line-height:1.25;padding:0 2px 2px}
 .badge.new{background:var(--good);color:#fff}
@@ -340,3 +340,18 @@ details.stores{background:var(--surface);border-radius:var(--r);padding:12px 14p
 details.stores summary{cursor:pointer;font-weight:650}
 .hero-t{font-family:var(--f-display);font-weight:900;font-size:30px;line-height:1.05;margin:8px 0}
 a.btn{text-decoration:none;color:var(--ink)}
+
+.ph{background:color-mix(in srgb,var(--sw,var(--sunk)) 16%,var(--sunk))}
+.fitcard{padding:6px;gap:6px}.fitcard .fc-title{font-size:11.5px}
+.mini4 .ph.cut img{padding:4%}
+.piece.full{grid-column:span 6}
+.piece.full .ph{aspect-ratio:2/1}
+.look.pick .collage.acc .piece{grid-column:span 1}
+.look.pick h2{font-size:17px}
+.ph.cut.light{background:linear-gradient(180deg,#dcdcd7,#cbcbc5)}
+.ed-photo,.ed-photo img{max-height:32vh}
+.collage.grid3{grid-template-columns:repeat(3,1fr)}
+.collage.grid3 .piece{grid-column:span 1}
+.look .collage.grid3 .ph{aspect-ratio:1/1}
+.look .collage.grid3 .ph img{object-fit:contain}
+.look .collage.grid3 .ph:not(.cut) img{object-fit:cover}
