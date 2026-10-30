@@ -355,3 +355,6 @@ a.btn{text-decoration:none;color:var(--ink)}
 .look .collage.grid3 .ph{aspect-ratio:1/1}
 .look .collage.grid3 .ph img{object-fit:contain}
 .look .collage.grid3 .ph:not(.cut) img{object-fit:cover}
+.gap-art{overflow:hidden}.gap-art img{width:100%;height:100%;object-fit:cover}
+.seenin{font-size:12.5px;color:var(--muted);text-decoration:none;display:flex;gap:6px;align-items:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.seenin .icon{flex:0 0 auto;width:14px;height:14px}

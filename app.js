@@ -40,7 +40,7 @@ const KIND = {
 };
 const RATE_TAGS=["Felt sharp","Comfy","Got compliments","Too warm","Too cold","Not me"];
 const DEFAULT_SETTINGS = {avoidRepeatDays:3, headwear:"auto", gloves:"auto", jewelry:"auto", avoidSkinny:true,
-  outStart:9, outEnd:22, manual:false, manualTemp:15, manualRain:false, units:"C", theme:"system", region:"auto", thermal:0, aiEnabled:false};
+  outStart:9, outEnd:22, manual:false, manualTemp:15, manualRain:false, units:"C", theme:"system", region:"auto", thermal:0, aiEnabled:false, autoCut:true};
 const DEFAULT_PROFILE = {name:""};
 
 const S = {
@@ -48,30 +48,90 @@ const S = {
   history:{wear:[], pairs:{}}, saved:[], dismissed:[], photos:[], taste:{w:{}, n:0}, plan:null, colorReview:[], onboarded:false,
   tab:"today", day:0, closetView:"pieces", filter:"all", query:"", sort:"new",
   feed:null, shuffle:0, closetV:0, locks:{}, wxState:"idle", ready:false, queue:[], presets:null,
-  styleVec:null, aiBusy:false, gapCache:null
+  styleVec:null, aiBusy:false, gapCache:null, cutJob:{done:0,total:0}, storage:{ok:true,files:null,persisted:null,recovered:0,lostPhotos:0,badRecords:0}
 };
 
 /* ================= storage (IndexedDB) ================= */
-let dbp=null;
-function idb(){ if (dbp) return dbp; dbp=new Promise((res,rej)=>{ const r=indexedDB.open("dailyfit",2);
-  r.onupgradeneeded=()=>{ const db=r.result; if (!db.objectStoreNames.contains("items")) db.createObjectStore("items",{keyPath:"id"}); if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv"); if (!db.objectStoreNames.contains("diary")) db.createObjectStore("diary",{keyPath:"id"}); };
-  r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); return dbp; }
-async function tx(store,mode,fn){ const db=await idb(); return new Promise((res,rej)=>{ const t=db.transaction(store,mode); const out=fn(t.objectStore(store)); t.oncomplete=()=>res(out&&"result" in out?out.result:undefined); t.onerror=()=>rej(t.error); t.onabort=()=>rej(t.error); }); }
-const itemsAll=()=>tx("items","readonly",s=>s.getAll());
-const itemPut=it=>tx("items","readwrite",s=>s.put(it));
-const itemsPut=l=>tx("items","readwrite",s=>{ l.forEach(i=>s.put(i)); });
-const itemDel=id=>tx("items","readwrite",s=>s.delete(id));
-const photosAll=()=>tx("diary","readonly",s=>s.getAll());
-const photoPut=e=>tx("diary","readwrite",s=>s.put(e));
-const photoDel=id=>tx("diary","readwrite",s=>s.delete(id));
-const kvGet=k=>tx("kv","readonly",s=>s.get(k));
-const kvSet=(k,v)=>tx("kv","readwrite",s=>s.put(v,k));
-const kvClear=()=>Promise.all(["kv","items","diary"].map(n=>tx(n,"readwrite",s=>s.clear())));
+/* ================= storage =================
+   Small records live in IndexedDB. Photos live as separate files in the browser's private file system (OPFS):
+   a big photo half-written during a reload can then never make the whole database unreadable.
+   A copy of everything except photos is also kept in localStorage, so a broken database can be rebuilt. */
 function debounce(fn,ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; }
+let dbp=null;
+function idb(){ if (dbp) return dbp; dbp=new Promise((res,rej)=>{ let r; try{ r=indexedDB.open("dailyfit",2); }catch(e){ dbp=null; rej(e); return; }
+  r.onupgradeneeded=()=>{ const db=r.result; if (!db.objectStoreNames.contains("items")) db.createObjectStore("items",{keyPath:"id"}); if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv"); if (!db.objectStoreNames.contains("diary")) db.createObjectStore("diary",{keyPath:"id"}); };
+  r.onsuccess=()=>{ const db=r.result; db.onversionchange=()=>{ db.close(); dbp=null; }; db.onclose=()=>{ dbp=null; }; res(db); };
+  r.onerror=()=>{ dbp=null; rej(r.error); }; }); return dbp; }
+async function tx(store,mode,fn){ const db=await idb(); return new Promise((res,rej)=>{ const t=db.transaction(store,mode,{durability:"strict"}); const out=fn(t.objectStore(store)); t.oncomplete=()=>res(out&&"result" in out?out.result:undefined); t.onerror=()=>rej(t.error); t.onabort=()=>rej(t.error); }); }
+const canWrite=()=>S.storage.ok;
+/* --- photo files --- */
+let imgDir=null, opfs=null;
+async function files(){
+  if (opfs===false) return null; if (imgDir) return imgDir;
+  try{ if (!navigator.storage||!navigator.storage.getDirectory||!("createWritable" in FileSystemFileHandle.prototype)) throw 0;
+    const root=await navigator.storage.getDirectory(); imgDir=await root.getDirectoryHandle("img",{create:true}); opfs=true; return imgDir; }
+  catch{ opfs=false; return null; }
+}
+async function fileWrite(name,blob){ const d=await files(); const fh=await d.getFileHandle(name,{create:true}); const w=await fh.createWritable(); await w.write(blob); await w.close(); }
+async function fileRead(name){ const d=await files(); if (!d) throw 0; return await (await d.getFileHandle(name)).getFile(); }
+async function fileDel(name){ const d=await files(); if (d&&name) try{ await d.removeEntry(name); }catch{} }
+const onDisk=new WeakMap();                    /* blob -> file name it is already saved under */
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+/* record without blobs (blobs written to files first); returns [record, file names that became unused] */
+async function dehydrate(rec,fields,prefix){
+  if (!(await files())) return [rec,[]];
+  const out={...rec}, old={...(rec.files||{})}, f2={}; const unused=[];
+  for (const f of fields){ const b=rec[f]; delete out[f];
+    if (b instanceof Blob){ let name=onDisk.get(b); if (!name){ name=`${prefix}.${f}.${uid()}`; await fileWrite(name,b); onDisk.set(b,name); } f2[f]=name; }
+    if (old[f]&&old[f]!==f2[f]) unused.push(old[f]); }
+  out.files=f2; return [out,unused];
+}
+async function hydrate(rec,fields){
+  if (!rec||!rec.files) return rec;
+  for (const f of fields){ const n=rec.files[f]; if (n&&!(rec[f] instanceof Blob)){ try{ const file=await fileRead(n); rec[f]=file; onDisk.set(file,n); }catch{ rec.lost=(rec.lost||0)+1; } } }
+  return rec;
+}
+const ITEM_F=["photo","thumb","cut","cutThumb"], PHOTO_F=["photo","thumb"];
+async function putRec(store,obj,fields,prefix){
+  if (!canWrite()) return;
+  const [rec,unused]=await dehydrate(obj,fields,prefix);
+  await tx(store,"readwrite",s=>s.put(rec)); obj.files=rec.files;
+  for (const n of unused) fileDel(n); snapSoon();
+}
+const itemPut=it=>putRec("items",it,ITEM_F,it.id);
+async function itemsPut(l){ for (const it of l) await itemPut(it); }
+async function itemDel(id){ if (!canWrite()) return; const it=S.items.find(i=>i.id===id); await tx("items","readwrite",s=>s.delete(id)); if (it&&it.files) Object.values(it.files).forEach(fileDel); snapSoon(); }
+const photoPut=e=>putRec("diary",e,PHOTO_F,e.id);
+async function photoDel(id){ if (!canWrite()) return; const e=S.photos.find(p=>p.id===id); await tx("diary","readwrite",s=>s.delete(id)); if (e&&e.files) Object.values(e.files).forEach(fileDel); snapSoon(); }
+const kvGet=k=>tx("kv","readonly",s=>s.get(k));
+async function kvSet(k,v){ if (!canWrite()) return;
+  if (k==="saved"&&Array.isArray(v)&&(await files())){ const out=[]; for (const f of v){ const [r,un]=await dehydrate(f,["inspoThumb"],"saved"); if (f.inspoThumb instanceof Blob) f.files=r.files; un.forEach(fileDel); out.push(r); } v=out; }
+  await tx("kv","readwrite",s=>s.put(v,k)); snapSoon(); }
+async function kvClear(){ await Promise.all(["kv","items","diary"].map(n=>tx(n,"readwrite",s=>s.clear())));
+  const d=await files(); if (d){ const names=[]; for await (const [n] of d.entries()) names.push(n); for (const n of names) await fileDel(n); }
+  try{ localStorage.removeItem(SNAP); }catch{} }
+/* tolerant read: one unreadable record never hides the rest */
+async function readAll(store){
+  try{ return {rows:await tx(store,"readonly",s=>s.getAll()),bad:0}; }
+  catch{ const keys=await tx(store,"readonly",s=>s.getAllKeys()); const rows=[]; let bad=0;
+    for (const k of keys){ try{ rows.push(await tx(store,"readonly",s=>s.get(k))); }catch{ bad++; } } return {rows,bad}; }
+}
+/* --- rolling safety copy (no photos) --- */
+const SNAP="dailyfit-snapshot";
+const stripItem=({photo,thumb,cut,cutThumb,emb,...m})=>m;
+function snapshot(){
+  if (!S.ready||!canWrite()) return;
+  try{ localStorage.setItem(SNAP,JSON.stringify({v:1,t:Date.now(),items:S.items.filter(i=>!i.virtual).map(stripItem),photos:S.photos.map(({photo,thumb,emb,...m})=>m),
+    settings:S.settings,profile:S.profile,loc:S.loc,history:{wear:S.history.wear.slice(-300),pairs:S.history.pairs},saved:S.saved.map(({inspoThumb,...m})=>m),
+    dismissed:S.dismissed,taste:S.taste,plan:S.plan,onboarded:S.onboarded})); }catch{}
+}
+const snapSoon=debounce(snapshot,1500);
+function readSnap(){ try{ const j=JSON.parse(localStorage.getItem(SNAP)||"null"); return j&&j.v===1?j:null; }catch{ return null; } }
 const saveSettings=debounce(()=>kvSet("settings",S.settings).catch(storageFail),250);
 const saveProfile=debounce(()=>kvSet("profile",S.profile).catch(storageFail),400);
 const saveHistory=()=>kvSet("history",{wear:S.history.wear.slice(-500),pairs:trimPairs(S.history.pairs)}).catch(storageFail);
 const saveTaste=debounce(()=>kvSet("taste",S.taste).catch(()=>{}),500);
+const itemsAll=()=>readAll("items"), photosAll=()=>readAll("diary");
 function storageFail(){ toast("Couldn't save on this device. Free some space and try again."); }
 function trimPairs(p){ const e=Object.entries(p); if (e.length<=800) return p; e.sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])); return Object.fromEntries(e.slice(0,800)); }
 function closetChanged(){ S.closetV++; S.feed=null; S.gapCache=null; }
@@ -79,9 +139,10 @@ function closetChanged(){ S.closetV++; S.feed=null; S.gapCache=null; }
 /* ================= images ================= */
 const urlCache=new Map();
 function blobURL(key, blob){ if (!blob) return ""; if (typeof blob==="string") return blob; let u=urlCache.get(key); if (!u){ u=URL.createObjectURL(blob); urlCache.set(key,u); } return u; }
-const thumbURL=it=>blobURL(it.id+":t", it.thumb||it.cut||it.photo);
+const useCut=it=>!!(it.cut&&!it.useOriginal);
+const thumbURL=it=>useCut(it)?blobURL(it.id+":ct", it.cutThumb||it.cut):blobURL(it.id+":t", it.thumb||it.photo);
 const bigURL=it=>blobURL(it.id+(it.cut&&!it.useOriginal?":c":":p"), it.cut&&!it.useOriginal?it.cut:(it.photo||it.thumb));
-function dropURLs(id){ for (const k of [":t",":c",":p"]) { const u=urlCache.get(id+k); if (u){ URL.revokeObjectURL(u); urlCache.delete(id+k); } } }
+function dropURLs(id){ for (const k of [":t",":ct",":c",":p"]) { const u=urlCache.get(id+k); if (u){ URL.revokeObjectURL(u); urlCache.delete(id+k); } } }
 /* phone photos are decoded off the main thread (createImageBitmap), with an <img> fallback */
 async function loadImage(f){ if (window.createImageBitmap){ try{ return await createImageBitmap(f,{imageOrientation:"from-image"}); }catch{} }
   return new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(f); }); }
@@ -178,7 +239,8 @@ const tasteFactor=()=>Math.min(1,S.taste.n/30);
 const FEAT_TEXT={"harm:none":"neutral palettes","harm:accent":"one colour accent","harm:analog":"matching colours","harm:compl":"loud colour combos","harm:clash":"clashing colours","harm:allblack":"all black",
   "prop:relaxed":"relaxed fits","prop:full":"oversized top and bottom","prop:fitloose":"fitted top, loose leg","prop:slim":"slim bottoms","prop:other":"regular fits",
   "hat":"headwear","gloves":"gloves","bag":"a bag","metal:mixed":"mixing metals"};
-function featText(k){ if (FEAT_TEXT[k]) return FEAT_TEXT[k]; const [a,b]=k.split(":"); if (a==="up") return b+" up top"; if (a==="low") return b+" bottoms"; if (a==="kind") return b+"s";
+function featText(k){ if (FEAT_TEXT[k]) return FEAT_TEXT[k]; const [a,b]=k.split(":");
+  if (a==="trend"){ const sg=activeSignals().find(x=>x.id===b); return (sg?sg.name:b.replace(/^live-/,"")).toLowerCase()+" (trend)"; } if (a==="up") return b+" up top"; if (a==="low") return b+" bottoms"; if (a==="kind") return b+"s";
   if (a==="layers") return b+" layers"; if (a==="jewel") return b==="0"?"no jewellery":"jewellery"; return k; }
 
 /* ================= outfit engine ================= */
@@ -245,7 +307,17 @@ function buildOutfit(P,p,L,rnd,force){
   return o;
 }
 function hueCount(parts){ const hues=[]; for (const c of parts){ if (NEUTRAL.has(cname(c))) continue; const h=hexToHsl(hexOf(c)).h; if (!hues.some(x=>hueDist(x,h)<25)) hues.push(h); } return hues; }
-const activeSignals=()=>{ const rc=regionCode(); return D.signals.filter(s=>s.regions.includes("all")||s.regions.includes(rc)); };
+/* trends: the bundled research plus the live feed the daily tracker publishes (data/trends.json) */
+const liveTrends=()=>S.trends&&Date.now()-Date.parse(S.trends.updated)<21*864e5?S.trends:null;
+const activeSignals=()=>{ const rc=regionCode(), lt=liveTrends(); const base=D.signals.filter(s=>s.regions.includes("all")||s.regions.includes(rc));
+  return lt?[...lt.signals.map(x=>({...x,strength:x.strength*(x.rising?1.2:.8)})),...base.map(x=>({...x,strength:x.strength*.6}))]:base; };
+async function fetchTrends(force=false){
+  if (!navigator.onLine||location.protocol==="file:") return;
+  if (!force&&S.trends&&Date.now()-(S.trendsChecked||0)<6*36e5) return;
+  try{ const r=await fetchT("data/trends.json?t="+Date.now(),15000); if (!r.ok) return; const j=await r.json(); if (!j||j.v!==1||!Array.isArray(j.signals)) return;
+    S.trendsChecked=Date.now(); const changed=!S.trends||S.trends.updated!==j.updated; S.trends=j; await kvSet("trends",j);
+    if (changed){ S.feed=null; S.gapCache=null; recomputeStyle(); } }catch{}
+}
 function trendHits(o){
   const all=[...wearOf(o),...jewelOf(o)], hits=[];
   for (const s of activeSignals()){ const m=s.match; let ok=true;
@@ -256,7 +328,7 @@ function trendHits(o){
     if (ok) hits.push(s); }
   return hits;
 }
-let closetBase={style:null};
+let closetBase={style:null,trend:null};
 function avgSim(parts,vec){ const e=parts.filter(p=>p.emb); if (!e.length||!vec) return null; return e.reduce((a,p)=>a+AI.cos(p.emb,vec),0)/e.length; }
 function scoreOutfit(o,ctx={}){
   const why=[], tags=[], f=[]; let s=0;
@@ -295,7 +367,10 @@ function scoreOutfit(o,ctx={}){
   if (o.hat) f.push("hat"); if (o.gloves) f.push("gloves"); if (o.bag) f.push("bag");
   const uf2=[...new Set(f)], tf=tasteFactor(); if (tf>0){ const d=tasteDot(uf2); s+=tf*Math.max(-1.5,Math.min(1.5,d*.5)); }
   if (S.styleVec){ const sim=avgSim(wear,S.styleVec); if (sim!=null&&closetBase.style!=null) s+=Math.max(-.6,Math.min(.9,(sim-closetBase.style)*10)); }
-  const th=trendHits(o); s+=Math.min(1,th.reduce((a,h)=>a+h.strength*.2,0)); if (th[0]) tags.push({t:th[0].name,c:"trend"});
+  /* trends count, but your own reaction to each trend (learned from wear/skip/ratings) can amplify or cancel them */
+  const th=trendHits(o); for (const h of th) uf2.push("trend:"+h.id);
+  s+=Math.min(1,th.reduce((a,h)=>a+h.strength*.2*Math.max(0,1+(S.taste.w["trend:"+h.id]||0)),0)); if (th[0]) tags.push({t:th[0].name,c:"trend"});
+  const lt=liveTrends(); if (lt&&lt.vector&&closetBase.trend!=null){ const sim=avgSim(wear,lt.vector); if (sim!=null) s+=Math.max(-.3,Math.min(.5,(sim-closetBase.trend)*6)); }
   return {score:s, why, tags:tags.slice(0,2), f:uf2};
 }
 function titleOf(o){
@@ -371,17 +446,25 @@ async function analyzeColor(src, isCut, emb){
   let probs=null; if (aiReady()&&emb){ try{ probs=await AI.colorProbs(emb); }catch{} }
   return fuseColor(px,probs);
 }
+/* how uniform the photo's border is: a plain backdrop has one dominant edge colour */
+function busyBackground(c){ const {data,w,h}=pixelsOf(c,120); const px=[]; const add=(x,y)=>{ const i=(y*w+x)*4; px.push([data[i],data[i+1],data[i+2]]); };
+  for (let x=0;x<w;x+=2){ add(x,0); add(x,h-1); } for (let y=0;y<h;y+=2){ add(0,y); add(w-1,y); }
+  const m=[0,1,2].map(k=>px.map(p=>p[k]).sort((a,b)=>a-b)[px.length>>1]);
+  const near=px.filter(p=>Math.abs(p[0]-m[0])+Math.abs(p[1]-m[1])+Math.abs(p[2]-m[2])<36).length/px.length; return near<.7; }
 /* the whole "look at a new photo" pipeline */
 async function analyzePiece(img, it, onStep){
   const photoC=canvasFrom(img,1100); it.photo=await toBlob(photoC,"image/jpeg",.85);
   let cut=null;
-  if (aiReady()&&AI.canCutout){ onStep&&onStep("Cutting out the background…"); try{ cut=await AI.removeBackground(it.photo); }catch{} }
-  if (cut){ it.cut=await cutBlob(cut,800); it.thumb=await cutBlob(cut,480); } else { it.thumb=await toBlob(canvasFrom(img,480),"image/jpeg",.82); }
-  it.cutTried=true;
+  it.thumb=await toBlob(canvasFrom(img,480),"image/jpeg",.82);
+  /* busy background (bed, floor, rail)? Recognition is more reliable on the cutout there (benchmark: 91% -> 94%); on plain backgrounds the original wins */
+  const busy=busyBackground(photoC);
+  if (aiReady()&&AI.canCutout&&(S.settings.autoCut||busy)){ onStep&&onStep("Removing the background…"); try{ cut=await AI.removeBackground(it.photo); if (S.settings.autoCut){ it.cutTried=true; if (!cut) it.cutNone=true; } }catch{ it.cutFail=(it.cutFail||0)+1; } }
+  if (cut&&S.settings.autoCut){ it.cut=await cutBlob(cut,800); it.cutThumb=await cutBlob(cut,480); }
   if (aiReady()){
     onStep&&onStep("Recognising the piece…");
     it.emb=await AI.embedImage(photoC);
-    const r=await AI.recognize(it.emb); it.ai=r;
+    const views=[it.emb]; if (cut&&busy){ try{ views.push(await AI.embedImage(onGrey(cut))); }catch{} }
+    const r=await AI.recognize(views); it.ai=r;
     if (r.cat!=="none"){ it.cat=r.cat; it.kind=r.kind; const k=KIND[r.kind]||{};
       if (k.w&&["top","layer","outer","bottom","hat","gloves"].includes(it.cat)) it.warmth=k.w;
       if (k.f) it.form=k.f; if (k.sub) it.sub=k.sub;
@@ -390,33 +473,49 @@ async function analyzePiece(img, it, onStep){
   const col=await analyzeColor(cut||img, !!cut, it.emb); it.color=col.hex; it.colorName=col.name;
   return it;
 }
+const needsCut=it=>!it.virtual&&!it.cut&&!it.cutTried&&(it.cutFail||0)<2&&!!(it.photo||it.thumb);
+/* remove one piece's background; colour is re-read from the clean cutout unless you set it yourself */
+async function cutPiece(it){
+  let cut=null;
+  try{ cut=await AI.removeBackground(it.photo||it.thumb); }catch{ it.cutFail=(it.cutFail||0)+1; return {status:"fail"}; }
+  it.cutTried=true;
+  if (!cut){ it.cutNone=true; return {status:"none"}; }
+  it.cut=await cutBlob(cut,800); it.cutThumb=await cutBlob(cut,480); it.useOriginal=false; it.cutNone=false; dropURLs(it.id); refreshThumb(it);
+  let changed=false;
+  if (!it.colorUser&&it.cat!=="jewelry"){ try{ const emb=it.emb||await AI.embedImage(it.photo||it.thumb); it.emb=emb; const col=await analyzeColor(cut,true,emb); const old=it.colorName||COL.nameHex(it.color);
+    if (col.name!==old){ S.colorReview=S.colorReview.filter(r=>r.id!==it.id); S.colorReview.push({id:it.id,oldHex:it.color,oldName:old}); changed=true; } it.color=col.hex; it.colorName=col.name; }catch{} }
+  return {status:"done",changed};
+}
+function renderCutProgress(){ const el=document.getElementById("cutProg"); if (el) el.textContent=cutStatus(); }
+function cutStatus(){ const left=S.items.filter(needsCut).length, done=S.items.filter(i=>i.cut).length;
+  if (S.aiBusy&&S.cutJob.total) return `Removing backgrounds… ${Math.min(S.cutJob.done,S.cutJob.total)} of ${S.cutJob.total}`;
+  return left?`${done} cut out · ${left} still with background`:`All ${done} photos cut out`; }
 async function backfill(){
-  if (!aiReady()||S.aiBusy) return; S.aiBusy=true; let changed=0;
+  if (!aiReady()||S.aiBusy) return; S.aiBusy=true; let changed=0; S.cutJob={done:0,total:S.settings.autoCut?S.items.filter(needsCut).length:0};
   try{
     for (const it of S.items.filter(i=>!i.virtual)){
       let touched=false;
-      if (AI.canCutout&&!it.cutTried&&(it.photo||it.thumb)){ try{ const cut=await AI.removeBackground(it.photo||it.thumb);
-          if (cut){ it.cut=await cutBlob(cut,800); it.thumb=await cutBlob(cut,480); dropURLs(it.id); refreshThumb(it);
-            if (!it.colorUser&&it.cat!=="jewelry"){ const emb=it.emb||await AI.embedImage(it.photo||it.thumb); it.emb=emb; const col=await analyzeColor(cut,true,emb); const old=it.colorName||COL.nameHex(it.color);
-              if (col.name!==old){ S.colorReview.push({id:it.id,oldHex:it.color,oldName:old}); changed++; } it.color=col.hex; it.colorName=col.name; } }
-        }catch{} it.cutTried=true; touched=true; }
+      if (S.settings.autoCut&&needsCut(it)){ const r=await cutPiece(it); S.cutJob.done++; renderCutProgress(); if (r.changed) changed++; touched=true; }
       if (!it.emb&&(it.photo||it.thumb)){ try{ it.emb=await AI.embedImage(it.photo||it.thumb); touched=true; }catch{} }
       if (touched){ await itemPut(it); }
     }
     for (const e of S.photos.filter(e=>!e.emb&&e.photo)){ try{ e.emb=await AI.embedImage(e.thumb||e.photo); await photoPut(e); }catch{} }
   } finally { S.aiBusy=false; }
-  recomputeStyle(); S.gapCache=null;
+  recomputeStyle(); S.gapCache=null; S.cutJob={done:0,total:0};
+  if (S.tab==="you"&&$("#sheet").hidden) renderYou($("#view"));
   if (changed){ closetChanged(); await kvSet("colorReview",S.colorReview); toast(`Cutouts done. Colours changed on ${changed} piece${changed>1?"s":""}.`,{label:"Review",fn:colorReviewSheet}); if (S.tab==="closet"&&$("#sheet").hidden) render(); }
 }
 /* swap a piece's picture in place wherever it's on screen, without re-rendering the page */
-function refreshThumb(it){ const u=thumbURL(it); document.querySelectorAll(`img[data-iid="${CSS.escape(it.id)}"]`).forEach(im=>{ im.src=u; im.parentElement.classList.toggle("cut",!!(it.cut&&!it.useOriginal)); }); }
+function refreshThumb(it){ const u=thumbURL(it); document.querySelectorAll(`img[data-iid="${CSS.escape(it.id)}"]`).forEach(im=>{ im.src=u; im.parentElement.classList.toggle("cut",useCut(it)); }); }
 /* old pieces saved without a small thumbnail: make one, a few at a time when the phone is idle */
 function ensureThumbs(){
-  const todo=S.items.filter(i=>(!i.thumb||i.thumb.size>180e3)&&(i.photo||i.thumb)); if (!todo.length) return;
+  /* pieces cut out by v6.0 kept only the cutout as thumbnail: keep it as the cutout thumbnail and rebuild the original */
+  const todo=S.items.filter(i=>(i.photo||i.thumb)&&(!i.thumb||i.thumb.size>180e3||(i.cut&&!i.cutThumb))); if (!todo.length) return;
   const idle=window.requestIdleCallback||(f=>setTimeout(f,200));
   const step=()=>idle(async()=>{ const it=todo.shift(); if (!it) return;
-    try{ const bm=await createImageBitmap(it.cut||it.thumb||it.photo); const c=canvasFrom(bm,480); bm.close&&bm.close(); it.thumb=it.cut?await cutBlob(c,480):await toBlob(c,"image/jpeg",.82);
-      await itemPut(it); const u=urlCache.get(it.id+":t"); if (u){ URL.revokeObjectURL(u); urlCache.delete(it.id+":t"); } refreshThumb(it); }catch{}
+    try{ if (it.cut&&!it.cutThumb){ it.cutThumb=it.thumb&&it.thumb.type==="image/webp"?it.thumb:await cutBlob(await createImageBitmap(it.cut),480); it.thumb=null; }
+      if (!it.thumb||it.thumb.size>180e3){ const bm=await createImageBitmap(it.photo||it.thumb); const c=canvasFrom(bm,480); bm.close&&bm.close(); it.thumb=await toBlob(c,"image/jpeg",.82); }
+      await itemPut(it); dropURLs(it.id); refreshThumb(it); }catch{}
     step(); });
   step();
 }
@@ -427,20 +526,32 @@ function recomputeStyle(){
   S.styleVec=vecs.length>=2?AI.mean(vecs):null;
   const embs=S.items.filter(i=>i.emb&&CLOTH.includes(i.cat));
   closetBase.style=S.styleVec&&embs.length?embs.reduce((a,i)=>a+AI.cos(i.emb,S.styleVec),0)/embs.length:null;
+  const lt=liveTrends(); closetBase.trend=lt&&lt.vector&&embs.length?embs.reduce((a,i)=>a+AI.cos(i.emb,lt.vector),0)/embs.length:null;
 }
 function regionCanvas(img,y0,y1,x0=.12,x1=.88){ const W=img.naturalWidth||img.width,H=img.naturalHeight||img.height,c=document.createElement("canvas");
   const b={x:Math.round(W*x0),y:Math.round(H*y0),w:Math.max(1,Math.round(W*(x1-x0))),h:Math.max(1,Math.round(H*(y1-y0)))}; const sc=Math.min(1,448/Math.max(b.w,b.h));
   c.width=Math.max(1,Math.round(b.w*sc)); c.height=Math.max(1,Math.round(b.h*sc)); c.getContext("2d").drawImage(img,b.x,b.y,b.w,b.h,0,0,c.width,c.height); return c; }
+/* find the person first (background removal), so a messy room or an off-centre mirror pic doesn't confuse the crops */
+async function personCut(img){
+  if (!AI.canCutout) return null;
+  try{ const cut=await AI.removeBackground(await toBlob(canvasFrom(img,1024),"image/jpeg",.9));
+    if (!cut||cut.height<cut.width*1.15) return null; return cut; }catch{ return null; }
+}
+function onGrey(c){ const o=document.createElement("canvas"); o.width=c.width; o.height=c.height; const x=o.getContext("2d"); x.fillStyle="#c8c8c8"; x.fillRect(0,0,o.width,o.height); x.drawImage(c,0,0); return o; }
 async function readLook(img){
-  const R={head:regionCanvas(img,0,.2,.25,.75),upper:regionCanvas(img,.14,.56),lower:regionCanvas(img,.5,.9,.15,.85),feet:regionCanvas(img,.84,1,.1,.9)};
-  const E={}; for (const k of Object.keys(R)) E[k]=await AI.embedImage(R[k]); E.full=await AI.embedImage(img);
+  const cut=await personCut(img), base=cut?onGrey(cut):img;
+  const box={head:[0,.17,.2,.8],upper:[.13,.55,.05,.95],lower:[.48,.88,.12,.88],feet:[.84,1,.05,.95]};
+  const R={}, C={}; for (const [k,[y0,y1,x0,x1]] of Object.entries(box)){ R[k]=regionCanvas(base,y0,y1,x0,x1); if (cut) C[k]=regionCanvas(cut,y0,y1,x0,x1); }
+  const E={}; for (const k of Object.keys(R)) E[k]=await AI.embedImage(R[k]); E.full=await AI.embedImage(base);
   const up=await AI.recognize(E.upper,["top","layer","outer"]);
   const head=await AI.recognize(E.head,["hat","none"]);
-  const col=k=>{ const {data,w,h}=pixelsOf(R[k],160); return COL.dominant(data,w,h,{}).name; };
-  return {E, upperCat:up.cat, upperKind:up.kind, hasHat:head.cat==="hat"&&head.conf>.6, colors:{upper:col("upper"),lower:col("lower"),feet:col("feet")}};
+  const col=k=>{ const src=cut?C[k]:R[k]; const {data,w,h}=pixelsOf(src,160); return COL.dominant(data,w,h,{alpha:!!cut}).name; };
+  return {E, person:!!cut, upperCat:up.cat, upperKind:up.kind, hasHat:head.cat==="hat"&&head.conf>.75, colors:{upper:col("upper"),lower:col("lower"),feet:col("feet")}};
 }
-function bestMatch(cat,emb,color=null,extra=()=>true){ const c=byCat(cat).filter(i=>i.emb&&extra(i)); if (!c.length) return null;
-  let b=null; for (const it of c){ const sim=AI.cos(it.emb,emb), r=sim+(color&&fam(cname(it))===fam(color)?.05:0); if (!b||r>b.r) b={it,s:sim,r}; } return b; }
+/* best closet match for a region: image similarity, plus a nudge when the colour family agrees; margin = lead over the runner-up */
+function bestMatch(cat,emb,color=null,extra=()=>true,pool=null){ const c=(pool||byCat(cat,S.items)).filter(i=>i.emb&&i.cat===cat&&extra(i)); if (!c.length) return null;
+  const sc=c.map(it=>{ const sim=AI.cos(it.emb,emb), cm=color?(cname(it)===color?.08:fam(cname(it))===fam(color)?.05:0):0; return {it,s:sim,r:sim+cm,cm}; }).sort((a,b)=>b.r-a.r);
+  return {...sc[0], margin:sc[1]?sc[0].r-sc[1].r:1}; }
 const matchLabel=s=>s>=.78?"close match":s>=.68?"similar":"loose match";
 
 /* ================= UI helpers ================= */
@@ -667,34 +778,58 @@ function rateSheet(w){
 const mirrorIn=document.createElement("input"); mirrorIn.type="file"; mirrorIn.accept="image/*"; mirrorIn.hidden=true; mirrorIn.id="mirrorIn"; document.body.appendChild(mirrorIn);
 let mirrorCtx=null;
 function startMirror(w=null){ mirrorCtx={w}; mirrorIn.value=""; mirrorIn.click(); }
+/* suggest the pieces in a photo of you: only when the match is clear (similar look and colour, ahead of the runner-up) */
+function suggestFromLook(look){
+  const pick=(cat,emb,col)=>{ const b=bestMatch(cat,emb,col); return b&&b.s>.5&&(b.cm>0||b.s>.66)&&b.margin>.004?b.it.id:null; };
+  /* hidden or small pieces (a tee under a jacket, a cap) are only suggested when the match is unmistakable */
+  const strict=(cat,emb)=>{ const b=bestMatch(cat,emb,null); return b&&b.s>.72&&b.margin>.02?b.it.id:null; };
+  return [...new Set([pick(look.upperCat,look.E.upper,look.colors.upper), look.upperCat!=="top"?strict("top",look.E.upper):null,
+    pick("bottom",look.E.lower,look.colors.lower), pick("shoes",look.E.feet,look.colors.feet), look.hasHat?strict("hat",look.E.head):null].filter(Boolean))];
+}
 mirrorIn.onchange=async()=>{
   const f=mirrorIn.files[0]; if (!f) return;
+  let img; try{ img=await loadImage(f); }catch{ toast("That photo couldn't be opened. Try a JPG or PNG."); return; }
+  busySheet(aiReady()?"Recognising your pieces…":"Preparing your photo…");
   try{
-    const img=await loadImage(f), photo=await toBlob(canvasFrom(img,1200),"image/jpeg",.84), thumb=await toBlob(canvasFrom(img,420),"image/jpeg",.78);
-    const today=new Date().toDateString();
-    let w=(mirrorCtx&&mirrorCtx.w)||[...S.history.wear].reverse().find(x=>new Date(x.t).toDateString()===today);
-    const e={id:"d"+Date.now().toString(36),t:Date.now(),photo,thumb};
-    if (aiReady()){ busySheet("Recognising your pieces…"); try{ const look=await readLook(img); e.emb=look.E.full;
-        if (!w){ const pick=(cat,emb,col)=>{ const b=bestMatch(cat,emb,col); return b&&b.s>.6?b.it.id:null; };
-          const ids=[...new Set([pick(look.upperCat,look.E.upper,look.colors.upper),look.upperCat!=="top"?pick("top",look.E.upper):null,pick("bottom",look.E.lower,look.colors.lower),pick("shoes",look.E.feet,look.colors.feet),look.hasHat?pick("hat",look.E.head):null].filter(Boolean))];
-          w={t:Date.now(),ids,temp:conditions(0).temp,rating:null,tags:[],fromMirror:true}; S.history.wear.push(w); } }catch{} }
-    if (!w){ w={t:Date.now(),ids:[],temp:conditions(0).temp,rating:null,tags:[],fromMirror:true}; S.history.wear.push(w); }
-    if (w.photoId){ await photoDel(w.photoId).catch(()=>{}); S.photos=S.photos.filter(p=>p.id!==w.photoId); }
-    e.wearT=w.t; w.photoId=e.id; await photoPut(e); S.photos.push(e); await saveHistory(); img.src&&URL.revokeObjectURL(img.src);
-    closeSheet(); render(); mirrorPieces(w);
-  }catch{ closeSheet(); toast("That photo couldn't be read."); }
+    const photo=await toBlob(canvasFrom(img,1200),"image/jpeg",.84), thumb=await toBlob(canvasFrom(img,420),"image/jpeg",.78);
+    /* a photo taken earlier in the week belongs to that day */
+    const taken=f.lastModified&&Date.now()-f.lastModified<7*864e5&&f.lastModified<=Date.now()?f.lastModified:Date.now();
+    const day=t=>new Date(t).toDateString();
+    const w=(mirrorCtx&&mirrorCtx.w)||[...S.history.wear].reverse().find(x=>day(x.t)===day(taken))||null;
+    let suggested=[], emb=null, person=null;
+    if (aiReady()){ try{ setBusy("Finding you in the photo…"); const look=await readLook(img); emb=look.E.full; person=look.person; suggested=suggestFromLook(look); }catch{} }
+    img.src&&URL.revokeObjectURL(img.src);
+    closeSheet(); mirrorPieces({w,taken,photo,thumb,emb,suggested,person});
+  }catch{ closeSheet(); toast("That photo couldn't be read. Try another one."); }
 };
-function mirrorPieces(w){
-  const ph=photoOf(w), grouped=CATS.map(c=>({c,items:S.items.filter(i=>i.cat===c.k)})).filter(g=>g.items.length);
-  const sel=new Set(w.ids);
-  const p=openSheet(`<div class="row between"><h2>What's in this fit?</h2><button type="button" class="btn quiet" id="x">Close</button></div>
-    ${ph?`<div class="mirror-ph"><img src="${esc(blobURL(ph.id+":t",ph.thumb||ph.photo))}" alt=""></div>`:""}
-    <p class="hint">${w.ids.length?"Pre-selected by the AI or from what you logged. Tap to fix.":"Tap the pieces you're wearing."}</p>
-    ${grouped.map(g=>`<div class="stack tight"><span class="label">${g.c.n}</span><div class="mini sel">${g.items.map(it=>`<button type="button" class="item" data-mi="${esc(it.id)}" aria-pressed="${sel.has(it.id)}">${phHTML(it)}</button>`).join("")}</div></div>`).join("")}
+/* confirm the pieces; nothing is saved until you tap Next */
+function mirrorPieces(ctx){
+  if (!ctx.photo){ const w=ctx; ctx={w,suggested:[],existing:true}; }
+  const w=ctx.w, ph=w&&photoOf(w), grouped=CATS.map(c=>({c,items:S.items.filter(i=>i.cat===c.k)})).filter(g=>g.items.length);
+  const ai=new Set(ctx.suggested), sel=new Set(w&&w.ids.length?w.ids:ctx.suggested);
+  const imgURL=ctx.thumb?URL.createObjectURL(ctx.thumb):ph?blobURL(ph.id+":t",ph.thumb||ph.photo):"";
+  const hint=w&&w.ids.length?"Pre-selected from the fit you logged that day. Tap to fix.":ai.size?`The AI picked ${ai.size} piece${ai.size>1?"s":""} (marked AI). Tap to fix or add the rest.`:aiReady()?(ctx.person===false?"Couldn't find you clearly in the photo. Tap the pieces you're wearing.":"No clear matches. Tap the pieces you're wearing."):"Tap the pieces you're wearing.";
+  const p=openSheet(`<div class="row between"><h2>What are you wearing?</h2><button type="button" class="btn quiet" id="x">Cancel</button></div>
+    ${imgURL?`<div class="mirror-ph"><img src="${esc(imgURL)}" alt=""></div>`:""}
+    <p class="hint">${esc(hint)}</p>
+    ${grouped.map(g=>`<div class="stack tight"><span class="label">${g.c.n}</span><div class="mini sel">${g.items.map(it=>`<button type="button" class="item" data-mi="${esc(it.id)}" aria-pressed="${sel.has(it.id)}">${phHTML(it,{badge:ai.has(it.id)?'<span class="badge new">AI</span>':""})}</button>`).join("")}</div></div>`).join("")}
     <button type="button" class="btn accent block" id="mpNext">Next: rate it</button>`,{full:true});
-  p.querySelector("#x").onclick=closeSheet;
-  p.querySelectorAll("[data-mi]").forEach(b=>b.onclick=()=>{ const id=b.dataset.mi; if (sel.has(id)) sel.delete(id); else sel.add(id); b.setAttribute("aria-pressed",String(sel.has(id))); });
-  p.querySelector("#mpNext").onclick=async()=>{ w.ids=[...sel]; await saveHistory(); closeSheet(); rateSheet(w); };
+  const done=()=>{ if (ctx.thumb) URL.revokeObjectURL(imgURL); closeSheet(); };
+  p.querySelector("#x").onclick=done;
+  p.querySelectorAll("[data-mi]").forEach(b=>b.onclick=()=>{ const id=b.dataset.mi; if (sel.has(id)) sel.delete(id); else sel.add(id); b.setAttribute("aria-pressed",String(sel.has(id))); buzz(); });
+  p.querySelector("#mpNext").onclick=async()=>{
+    if (!sel.size){ toast("Tap at least one piece first."); return; }
+    const btn=p.querySelector("#mpNext"); btn.disabled=true;
+    try{
+      let entry=w;
+      if (!entry){ entry={t:ctx.taken||Date.now(),ids:[],temp:conditions(0).temp,rating:null,tags:[],fromMirror:true}; S.history.wear.push(entry); S.history.wear.sort((a,b)=>a.t-b.t); }
+      const before=new Set(entry.ids); entry.ids=[...sel];
+      for (const id of entry.ids) if (!before.has(id)){ const it=S.items.find(i=>i.id===id); if (it){ it.wearCount=(it.wearCount||0)+1; it.lastWorn=Math.max(it.lastWorn||0,entry.t); await itemPut(it); } }
+      if (ctx.photo){ if (entry.photoId){ await photoDel(entry.photoId).catch(()=>{}); S.photos=S.photos.filter(x=>x.id!==entry.photoId); }
+        const e={id:"d"+uid(),t:entry.t,photo:ctx.photo,thumb:ctx.thumb,emb:ctx.emb,wearT:entry.t}; await photoPut(e); S.photos.push(e); entry.photoId=e.id; }
+      await saveHistory(); done(); render(); rateSheet(entry);
+    }catch{ btn.disabled=false; toast("Couldn't save. Try again."); }
+  };
 }
 
 /* ================= RECREATE AN INSPO FIT ================= */
@@ -705,15 +840,16 @@ function startRecreate(){
   inspoIn.value=""; inspoIn.click();
 }
 inspoIn.onchange=async()=>{
+  const bm=(c,e,col,ex=()=>true)=>bestMatch(c,e,col,i=>!i.inWash&&ex(i));
   const f=inspoIn.files[0]; if (!f) return; busySheet("Reading the look…");
   try{
     const img=await loadImage(f), look=await readLook(img), c=conditions(0), p=weatherPlan(c), o={}, miss=[], notes=[];
     const word=k=>k==="outer"?"jacket":k==="layer"?"knit or hoodie":"top";
-    const up=bestMatch(look.upperCat,look.E.upper,look.colors.upper); if (up){ o[look.upperCat]=up.it; if (up.s<.68) miss.push(`a ${look.colors.upper} ${look.upperKind||word(look.upperCat)} closer to this one`); } else miss.push(`a ${look.colors.upper} ${look.upperKind||word(look.upperCat)}`);
-    if (look.upperCat!=="top"){ const t=bestMatch("top",look.E.upper,null,i=>(p.top||[1,2,3]).includes(i.warmth||1)); if (t) o.top=t.it; }
-    const lo=bestMatch("bottom",look.E.lower,look.colors.lower); if (lo){ o.bottom=lo.it; if (lo.s<.68) miss.push(`${look.colors.lower} trousers closer to these`); } else miss.push(`${look.colors.lower} trousers`);
-    const sh=bestMatch("shoes",look.E.feet,look.colors.feet); if (sh){ o.shoes=sh.it; if (sh.s<.68) miss.push(`${look.colors.feet} shoes closer to these`); }
-    if (look.hasHat){ const h=bestMatch("hat",look.E.head); if (h) o.hat=h.it; else miss.push("headwear"); }
+    const up=bm(look.upperCat,look.E.upper,look.colors.upper); if (up){ o[look.upperCat]=up.it; if (up.s<.68) miss.push(`a ${look.colors.upper} ${look.upperKind||word(look.upperCat)} closer to this one`); } else miss.push(`a ${look.colors.upper} ${look.upperKind||word(look.upperCat)}`);
+    if (look.upperCat!=="top"){ const t=bm("top",look.E.upper,null,i=>(p.top||[1,2,3]).includes(i.warmth||1)); if (t) o.top=t.it; }
+    const lo=bm("bottom",look.E.lower,look.colors.lower); if (lo){ o.bottom=lo.it; if (lo.s<.68) miss.push(`${look.colors.lower} trousers closer to these`); } else miss.push(`${look.colors.lower} trousers`);
+    const sh=bm("shoes",look.E.feet,look.colors.feet); if (sh){ o.shoes=sh.it; if (sh.s<.68) miss.push(`${look.colors.feet} shoes closer to these`); }
+    if (look.hasHat){ const h=bm("hat",look.E.head); if (h) o.hat=h.it; else miss.push("headwear"); }
     if (p.outer==="need"&&!o.outer){ const warm=byCat("outer").filter(i=>(p.outerW||[2,3]).includes(i.warmth||2)); if (warm.length){ warm.sort((a,b)=>AI.cos(b.emb||look.E.upper,look.E.upper)-AI.cos(a.emb||look.E.upper,look.E.upper)); o.outer=warm[0]; notes.push(`It's ${deg(c.temp)}, so a warm jacket goes over it.`); } }
     for (const z of ["neck","wrist","hand","ear"]){ const pin=avail().filter(j=>j.cat==="jewelry"&&JZONE[j.sub]===z&&j.pinned); if (pin.length) o[z]=pin[0]; }
     if (!o.top||!o.bottom||!o.shoes){ closeSheet(); toast("Not enough matching pieces yet. Add tops, bottoms and shoes first."); return; }
@@ -833,7 +969,7 @@ const suggestName=it=>{ if (!it.cat) return ""; if (it.cat==="jewelry") return c
 let draft=null;
 function openEditor(item,isNew=false){
   draft={isNew,item:{...item}}; const it=draft.item; const ai=it.ai||null;
-  const src=isNew?URL.createObjectURL(it.cut||it.photo):bigURL(it); draft.tmpURL=isNew?src:null;
+  const src=isNew?URL.createObjectURL(useCut(it)?it.cut:(it.photo||it.thumb)):bigURL(it); draft.tmpURL=isNew?src:null;
   const clothes=["top","layer","outer","bottom"].includes(it.cat), hasWarm=["top","layer","outer","bottom","hat","gloves"].includes(it.cat), hasForm=["top","layer","outer","bottom","shoes"].includes(it.cat);
   const qpos=isNew&&S.queueTotal>1?`<span class="label">${S.queueTotal-S.queue.length} of ${S.queueTotal}</span>`:"";
   let aiNote="";
@@ -843,8 +979,9 @@ function openEditor(item,isNew=false){
   if (!it.name) it.name=suggestName(it);
   const swatches=COL.NAMES.map(n=>`<button type="button" class="swatch${cname(it)===n?" on":""}" data-color="${n}" style="background:${COL.CANON[n]}" aria-label="${n}" title="${n}"></button>`).join("");
   const panel=openSheet(`<div class="row between"><h2>${isNew?"New piece":"Edit piece"}</h2><div class="row">${qpos}<button type="button" class="btn quiet" id="x">${isNew&&S.queue.length?"Skip":"Close"}</button></div></div>
-    <div class="ed-photo${it.cut&&!it.useOriginal?" cut":""}">${src?`<img src="${esc(src)}" alt="">`:""}</div>
-    ${it.cut&&!isNew?`<label class="toggle"><span>Use the original photo</span><input type="checkbox" class="switch" id="origIt" ${it.useOriginal?"checked":""}></label>`:""}
+    <div class="ed-photo${useCut(it)?" cut":""}">${src?`<img src="${esc(src)}" alt="">`:""}</div>
+    ${it.photo||it.thumb?(it.cut?`<div class="row between"><span class="label">Background</span>${seg("bgmode",[["cut","Removed"],["orig","Original photo"]],it.useOriginal?"orig":"cut")}</div>`
+      :`<div class="row between"><span class="small muted">${it.cutNone?"Couldn't separate one piece from this photo. A plain surface helps.":"Show just the piece, without the background."}</span><button type="button" class="btn quiet" id="cutBtn">Remove background</button></div>`):""}
     ${aiNote}
     <div class="field"><label class="label" for="nm">Name</label><input type="text" id="nm" value="${esc(it.name)}" autocomplete="off"></div>
     <div class="field"><span class="label">Type</span>${seg("cat",CATS.map(c=>[c.k,c.n]),it.cat||"")}</div>
@@ -872,7 +1009,15 @@ function openEditor(item,isNew=false){
     panel.querySelectorAll("[data-color]").forEach(x=>x.classList.toggle("on",x===b)); panel.querySelector("#colName").textContent=it.colorName; nameAuto(); });
   panel.querySelector("#pinIt").onchange=e=>it.pinned=e.target.checked;
   const wi=panel.querySelector("#washIt"); if (wi) wi.onchange=e=>it.inWash=e.target.checked;
-  const oi=panel.querySelector("#origIt"); if (oi) oi.onchange=e=>{ it.useOriginal=e.target.checked; panel.querySelector(".ed-photo").classList.toggle("cut",!it.useOriginal); panel.querySelector(".ed-photo img").src=it.useOriginal?blobURL(it.id+":p",it.photo):blobURL(it.id+":c",it.cut); };
+  panel.querySelectorAll("[data-bgmode]").forEach(b=>b.onclick=()=>{ it.useOriginal=b.dataset.bgmode==="orig"; reopen(); });
+  const cb=panel.querySelector("#cutBtn"); if (cb) cb.onclick=async()=>{
+    if (!aiReady()){ if (AI&&AI.state==="loading"){ toast("The AI is still downloading. Try again in a moment."); return; } aiNeededSheet("Removing backgrounds uses the on-device AI."); return; }
+    if (!AI.canCutout){ toast("Background removal isn't available on this phone."); return; }
+    cb.disabled=true; cb.textContent="Removing…"; it.cutTried=false; it.cutFail=0;
+    const r=await cutPiece(it);
+    if (r.status==="done"){ buzz();
+      if (!isNew){ const real=S.items.find(x=>x.id===it.id); if (real){ for (const k of ["cut","cutThumb","useOriginal","cutTried","cutNone","color","colorName","emb"]) real[k]=it[k]; await itemPut(real).catch(storageFail); dropURLs(real.id); refreshThumb(real); closetChanged(); } }
+      reopen(); } else { cb.disabled=false; cb.textContent="Try again"; toast(r.status==="none"?"Couldn't find one clear piece in this photo.":"That didn't work. Try again."); } };
   panel.querySelector("#saveIt").onclick=commit;
   const d=panel.querySelector("#delIt"); if (d) d.onclick=()=>confirmSheet("Remove this piece and its photo?","Remove",()=>removeItem(it));
 }
@@ -900,8 +1045,20 @@ function ownsSimilar(g){
   return S.items.find(i=>i.cat===g.cat&&(!g.sub||!i.sub||i.sub===g.sub||g.cat==="shoes"&&i.sub===g.sub)&&(g.cat==="jewelry"?(!g.metal||i.metal===g.metal):fam(cname(i))===fam(g.color))&&(g.cat!=="bottom"||!g.kind||i.kind===g.kind||!i.kind||(["jeans"].includes(g.kind)===(i.kind==="jeans"))));
 }
 const virtualOf=g=>({id:"virt:"+g.id,virtual:true,name:g.name,cat:g.cat,kind:g.kind,sub:g.sub||(KIND[g.kind]||{}).sub||"",metal:g.metal||"",colorName:g.color,color:COL.CANON[g.color]||"#888",warmth:g.warmth||2,form:g.form||1,fit:g.fit||"regular"});
+/* pieces the live trend tracker is seeing, turned into shopping ideas (colour = the colour it saw most) */
+function allGaps(){
+  const lt=liveTrends(); if (!lt) return D.gaps;
+  const dyn=[]; const DEF={top:"white",layer:"grey",outer:"black",bottom:"black",shoes:"black",hat:"black",jewelry:"",acc:"black"};
+  for (const sg of lt.signals){ const p=sg.piece; if (!p||sg.strength<.35) continue;
+    const color=p.cat==="jewelry"?"":(sg.color&&COL.CANON[sg.color]?sg.color:DEF[p.cat]); const kindName=p.kind;
+    const id="t-"+sg.id.replace(/^live-/,"")+"-"+(color||p.metal||"x");
+    if (D.gaps.some(g=>g.cat===p.cat&&(g.kind===p.kind||(!g.kind&&g.sub&&g.sub===p.sub))&&(g.color===color||p.cat==="jewelry"))) continue;
+    const name=cap(`${p.cat==="jewelry"?(p.metal||"silver"):color} ${p.fit==="wide"&&p.cat==="bottom"?"wide ":""}${kindName}`);
+    dyn.push({id,cat:p.cat,kind:p.kind,sub:p.sub||"",metal:p.metal||"",color,warmth:p.warmth||2,form:p.form||1,fit:p.fit||"regular",name,q:{en:`${name} men`,ko:`${name} 남성`,de:`${name} herren`},signal:sg}); }
+  return [...dyn,...D.gaps];
+}
 async function analyzeGaps(){
-  const ck=[S.closetV,regionCode(),Math.round(conditions(0).temp/3),S.dismissed.length].join("|");
+  const ck=[S.closetV,regionCode(),Math.round(conditions(0).temp/3),S.dismissed.length,S.trends&&S.trends.updated].join("|");
   if (S.gapCache&&S.gapCache.key===ck) return S.gapCache;
   const c0=conditions(0), temps=[c0.temp-8,c0.temp-3,c0.temp+3].map(t=>Math.max(-15,Math.min(30,t)));
   const scen=[...temps.map(t=>({...c0,temp:t,low:t,high:t,wet:false,snow:false,sunny:true,source:"sim"})),{...c0,temp:c0.temp,low:c0.temp,high:c0.temp,wet:true,sunny:false,source:"sim"}];
@@ -909,7 +1066,7 @@ async function analyzeGaps(){
   const thr=base.cands.length?Math.max(6,base.cands[Math.min(base.cands.length-1,8)].score-.4):0;
   const missingCats=CORE.filter(k=>!S.items.some(i=>i.cat===k));
   const out=[];
-  for (const g of D.gaps){
+  for (const g of allGaps()){
     if (S.dismissed.includes(g.id)||ownsSimilar(g)) continue;
     const V=virtualOf(g), slot=slotOf(V), good=new Set(), partners=new Set(); let best=null;
     if (!missingCats.length||missingCats.includes(g.cat)){
@@ -917,9 +1074,9 @@ async function analyzeGaps(){
         for (const o of r.cands){ if (o.score>=thr){ good.add(o.key); for (const it of partsOf(o)) if (!it.virtual) partners.add(it.id); }
           if (!best||o.score>best.score) best=o; } }
     }
-    const trend=activeSignals().find(s=>{ const m=s.match; return (!m.cats||m.cats.includes(g.cat))&&(!m.kinds||m.kinds.includes(g.kind))&&(!m.colors||m.colors.includes(g.color))&&(!m.fits||m.fits.includes(g.fit))&&(!m.subs||m.subs.includes(g.sub))&&!m.layersMin&&!m.accentOne; });
+    const trend=g.signal||activeSignals().find(s=>{ const m=s.match; return (!m.cats||m.cats.includes(g.cat))&&(!m.kinds||m.kinds.includes(g.kind))&&(!m.colors||m.colors.includes(g.color))&&(!m.fits||m.fits.includes(g.fit))&&(!m.subs||m.subs.includes(g.sub))&&!m.layersMin&&!m.accentOne; });
     const needed=missingCats.includes(g.cat);
-    out.push({g,V,n:good.size,partners:partners.size,best,trend,needed,rank:(needed?1000:0)+good.size+(trend?trend.strength*1.5:0)});
+    out.push({g,V,n:good.size,partners:partners.size,best,trend,needed,rank:(needed?1000:0)+good.size*(trend?1+trend.strength*.3:1)+(trend?trend.strength*4:0)});
     await new Promise(r=>setTimeout(r,0));
   }
   out.sort((a,b)=>b.rank-a.rank);
@@ -935,18 +1092,19 @@ function renderShop(v){
   analyzeGaps().then(G=>{ const box=$("#gaps"); if (!box||S.tab!=="shop") return;
     if (!G.list.length){ box.innerHTML=`<div class="notice solid">Your closet already covers the essentials for this weather. Nothing to buy right now.</div>`; return; }
     box.innerHTML=(G.missingCats.length?`<div class="notice solid">You have no ${G.missingCats.map(k=>CATN[k].toLowerCase()).join(" or ")} yet, so those come first.</div>`:"")+G.list.map((x,i)=>gapHTML(x,i,R,rc)).join("");
-    box.querySelectorAll("[data-got]").forEach(b=>b.onclick=()=>{ const g=D.gaps.find(x=>x.id===b.dataset.got); S.presets={cat:g.cat,kind:g.kind,sub:g.sub||(KIND[g.kind]||{}).sub,metal:g.metal,warmth:g.warmth,form:g.form,fit:g.fit}; toast("Nice. Take a photo of it to add it."); $("#fileCam").click(); });
+    box.querySelectorAll("[data-got]").forEach(b=>b.onclick=()=>{ const g=allGaps().find(x=>x.id===b.dataset.got); S.presets={cat:g.cat,kind:g.kind,sub:g.sub||(KIND[g.kind]||{}).sub,metal:g.metal,warmth:g.warmth,form:g.form,fit:g.fit}; toast("Nice. Take a photo of it to add it."); $("#fileCam").click(); });
     box.querySelectorAll("[data-hide]").forEach(b=>b.onclick=async()=>{ S.dismissed.push(b.dataset.hide); await kvSet("dismissed",S.dismissed); S.gapCache=null; renderShop(v); toast("Hidden.",{label:"Undo",fn:async()=>{ S.dismissed.pop(); await kvSet("dismissed",S.dismissed); S.gapCache=null; renderShop($("#view")); }}); });
   });
 }
 function gapHTML(x,i,R,rc){
-  const g=x.g, q=g.q[R.lang]||g.q.en, price=g.price&&g.price[rc];
+  const g=x.g, q=g.q[R.lang]||g.q.en, price=g.price&&g.price[rc], ex=x.trend&&x.trend.examples&&x.trend.examples.find(e=>e.img)||null;
   const look=x.best?`<div class="ctl"><span class="label">A fit it makes with your clothes</span><div class="mini">${partsOf(x.best).map(it=>`<div title="${esc(it.name)}">${phHTML(it,{badge:it.virtual?'<span class="badge new">New</span>':""})}</div>`).join("")}</div></div>`:"";
   return `<article class="gap">
-    <div class="gap-top"><div class="gap-art">${ART.svg(x.V,x.V.color)}</div>
-      <div class="gap-body"><span class="label">${CATN[g.cat]}${x.trend?` · <span class="trendtag">Trending</span>`:""}</span><h3>${esc(g.name)}</h3>
+    <div class="gap-top"><div class="gap-art">${ex&&ex.img?`<img src="${esc(ex.img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createRange().createContextualFragment(this.dataset.art))" data-art="${esc(ART.svg(x.V,x.V.color))}">`:ART.svg(x.V,x.V.color)}</div>
+      <div class="gap-body"><span class="label">${CATN[g.cat]}${x.trend?` · <span class="trendtag">${x.trend.rising?"Rising now":"Trending"}</span>`:""}</span><h3>${esc(g.name)}</h3>
         ${x.needed?`<p class="metric">You have no ${CATN[g.cat].toLowerCase()} yet</p>`:`<p class="metric"><b>${x.n}</b> new fit${x.n===1?"":"s"}</p><p class="small muted">Works with ${x.partners} of your pieces</p>`}
         ${price?`<p class="small">${esc(price)}</p>`:""}</div></div>
+    ${ex?`<a class="seenin" href="${esc(ex.link)}" target="_blank" rel="noopener">Seen in: ${esc(ex.title)} ${IC.ext}</a>`:""}
     ${look}
     <div class="gap-actions"><a class="btn" href="https://www.google.com/search?tbm=isch&q=${encodeURIComponent(g.q.en)}" target="_blank" rel="noopener">Photos ${IC.ext}</a>
       <a class="btn" href="${R.search.url}${encodeURIComponent(q)}" target="_blank" rel="noopener">${esc(R.search.name)} ${IC.ext}</a>
@@ -1005,15 +1163,20 @@ function renderYou(v){
     </div></section>
     <section><div class="group-title label">App</div><div class="group">
       <button type="button" class="rowi" id="locBtn"><div><div class="k">Location</div><div class="h">${S.loc?esc(S.loc.name):"Not set"}</div></div><span class="chev"></span></button>
+      <div class="rowi"><div><div class="k">Trend tracker</div><div class="h">${trendLine()}</div></div></div>
       <button type="button" class="rowi" id="regBtn"><div><div class="k">Shopping region</div><div class="h">${esc(region().name)}${st.region==="auto"?" · automatic":""}</div></div><span class="chev"></span></button>
       <div class="rowi stackrow"><div class="row between"><div><div class="k">Fashion AI</div><div class="h">${aiState==="ready"?`On · offline${S.aiBusy?" · processing your closet…":""}`:aiState==="loading"?`Downloading ${Math.round((AI.progress||0)*100)}%`:aiState==="error"?"Download failed":"Cuts out photos, tags pieces, reads looks. ~200 MB once."}</div></div>
         ${aiState==="ready"||aiState==="loading"?"":`<button type="button" class="btn accent" id="aiOn">${aiState==="error"?"Retry":"Turn on"}</button>`}</div>
         ${aiState==="loading"?`<div class="progress"><span style="width:${Math.round((AI.progress||0)*100)}%"></span></div>`:""}</div>
+      ${aiState==="ready"&&AI.canCutout?`<div class="rowi stackrow"><div class="row between"><div><div class="k">Remove backgrounds</div><div class="h" id="cutProg">${cutStatus()}</div></div>
+        ${S.items.some(needsCut)&&!S.aiBusy?`<button type="button" class="btn quiet" id="cutAll">Remove all</button>`:""}</div>
+        <label class="toggle"><span class="small">Automatically for new photos</span><input type="checkbox" class="switch" id="autoCut" ${st.autoCut?"checked":""}></label></div>`:""}
       <div class="rowi"><span class="k">Units</span>${seg("units",[["C","°C"],["F","°F"]],st.units)}</div>
       <div class="rowi"><span class="k">Theme</span>${seg("theme",[["system","Auto"],["light","Light"],["dark","Dark"]],st.theme)}</div>
     </div></section>
     <section><div class="group-title label">Your data stays on this phone <span id="storeUse"></span></div><div class="group">
-      <button type="button" class="rowi" id="exportBtn"><span class="k">Back up</span><span class="chev"></span></button>
+      <div class="rowi"><div><div class="k">Storage</div><div class="h">${storageLine()}</div></div>${S.storage.persisted===false?`<button type="button" class="btn quiet" id="persistBtn">Protect</button>`:""}</div>
+      <button type="button" class="rowi" id="exportBtn"><div><div class="k">Back up</div><div class="h">${S.settings.lastBackup?"Last backup "+ago(S.settings.lastBackup):"Never backed up"}</div></div><span class="chev"></span></button>
       <button type="button" class="rowi" id="importBtn"><span class="k">Restore from backup</span><span class="chev"></span></button>
       ${S.taste.n?`<button type="button" class="rowi" id="resetTaste"><span class="k">Reset learned style</span><span class="chev"></span></button>`:""}
       <button type="button" class="rowi" id="wipe"><span class="k" style="color:var(--bad)">Delete everything</span></button></div></section>
@@ -1026,11 +1189,14 @@ function renderYou(v){
   on("#thMinus","onclick",()=>{ st.thermal=Math.max(-5,(st.thermal||0)-1); saveSettings(); renderYou(v); });
   on("#thPlus","onclick",()=>{ st.thermal=Math.min(5,(st.thermal||0)+1); saveSettings(); renderYou(v); });
   on("#resetTaste","onclick",()=>confirmSheet("Reset what the app learned about your style?","Reset",async()=>{ S.history.pairs={}; S.taste={w:{},n:0}; st.thermal=0; saveSettings(); await saveHistory(); await kvSet("taste",S.taste); render(); toast("Learned style reset."); }));
+  on("#cutAll","onclick",()=>{ st.autoCut=true; saveSettings(); S.items.forEach(i=>{ if (!i.cut){ i.cutTried=false; i.cutFail=0; } }); backfill(); setTimeout(()=>renderYou(v),100); });
+  on("#autoCut","onchange",e=>{ st.autoCut=e.target.checked; saveSettings(); if (st.autoCut) backfill(); });
   on("#locBtn","onclick",locationSheet); on("#regBtn","onclick",regionSheet); on("#aiOn","onclick",()=>enableAI());
   v.querySelectorAll("[data-units]").forEach(b=>b.onclick=()=>{ st.units=b.dataset.units; saveSettings(); renderYou(v); });
   v.querySelectorAll("[data-theme]").forEach(b=>b.onclick=()=>{ st.theme=b.dataset.theme; saveSettings(); applyTheme(); renderYou(v); });
   v.querySelectorAll("[data-best]").forEach(b=>b.onclick=()=>rateSheet(S.history.wear[+b.dataset.best]));
-  on("#exportBtn","onclick",exportData); on("#importBtn","onclick",()=>$("#fileImport").click());
+  on("#exportBtn","onclick",exportData);
+  on("#persistBtn","onclick",async()=>{ try{ S.storage.persisted=await navigator.storage.persist(); }catch{} renderYou(v); toast(S.storage.persisted?"Storage protected.":"Chrome declined. Add Daily Fit to your home screen, then try again."); }); on("#importBtn","onclick",()=>$("#fileImport").click());
   on("#wipe","onclick",()=>confirmSheet("Delete your whole closet, photos, history and settings from this phone?","Delete everything",async()=>{ await kvClear(); location.reload(); }));
   if (navigator.storage&&navigator.storage.estimate) navigator.storage.estimate().then(e=>{ const el=$("#storeUse"); if (el) el.textContent=`· ${(e.usage/1048576).toFixed(0)} MB`; }).catch(()=>{});
 }
@@ -1039,15 +1205,23 @@ if (AI) AI.subscribe(debounce(()=>{ if (S.ready&&S.tab==="you"&&$("#sheet").hidd
 /* ================= backup ================= */
 const b2u=b=>new Promise(res=>{ if (!b||typeof b==="string") return res(b||""); const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(b); });
 const u2b=async u=>u?(await fetch(u)).blob():null;
+function trendLine(){ const t=S.trends; if (!t) return "Not running yet: it updates once a day after it's set up on GitHub. Until then, fits use built-in trend research.";
+  const live=liveTrends(), up=t.signals.filter(x=>x.rising).map(x=>x.name.toLowerCase()).slice(0,3);
+  return `${live?"Updated "+ago(Date.parse(t.updated)):"Out of date (last "+ago(Date.parse(t.updated))+")"} · ${t.weeksOfHistory} week${t.weeksOfHistory>1?"s":""} of history${up.length?" · rising: "+up.join(", "):""}`; }
+function storageLine(){ const st=S.storage;
+  if (!st.ok) return "Problem: changes aren't being saved. Close the app fully and reopen it.";
+  const parts=[st.persisted?"Protected from automatic clearing":st.persisted===false?"Chrome may clear it when space runs low":"Saved on this phone", st.files?"photos stored as files":"photos stored in the database"];
+  if (st.recovered) parts.push(`recovered ${st.recovered} piece${st.recovered>1?"s":""} after an error`);
+  return parts.join(" · "); }
 async function exportData(){
   toast("Preparing backup…");
-  try{ const items=await Promise.all(S.items.map(async({emb,...it})=>({...it,photo:await b2u(it.photo),thumb:await b2u(it.thumb),cut:await b2u(it.cut)})));
-    const photos=await Promise.all(S.photos.map(async({emb,...e})=>({...e,photo:await b2u(e.photo),thumb:await b2u(e.thumb)})));
+  try{ const items=await Promise.all(S.items.map(async({emb,files,lost,...it})=>({...it,photo:await b2u(it.photo),thumb:await b2u(it.thumb),cut:await b2u(it.cut)})));
+    const photos=await Promise.all(S.photos.map(async({emb,files,lost,...e})=>({...e,photo:await b2u(e.photo),thumb:await b2u(e.thumb)})));
     const saved=await Promise.all(S.saved.map(async f=>f.inspoThumb?{...f,inspoThumb:await b2u(f.inspoThumb)}:f));
     const data={app:"dailyfit",v:6,exported:new Date().toISOString(),items,photos,settings:S.settings,profile:S.profile,loc:S.loc,history:S.history,saved,dismissed:S.dismissed,taste:S.taste};
     const blob=new Blob([JSON.stringify(data)],{type:"application/json"}), name=`dailyfit-backup-${new Date().toISOString().slice(0,10)}.json`, file=new File([blob],name,{type:"application/json"});
-    if (navigator.canShare&&navigator.canShare({files:[file]})){ try{ await navigator.share({files:[file],title:"Daily Fit backup"}); return; }catch(e){ if (e&&e.name==="AbortError") return; } }
-    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),5000); toast("Backup saved to your downloads.");
+    if (navigator.canShare&&navigator.canShare({files:[file]})){ try{ await navigator.share({files:[file],title:"Daily Fit backup"}); S.settings.lastBackup=Date.now(); saveSettings(); return; }catch(e){ if (e&&e.name==="AbortError") return; } }
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),5000); S.settings.lastBackup=Date.now(); saveSettings(); toast("Backup saved to your downloads.");
   }catch{ toast("Backup failed. Try again."); }
 }
 $("#fileImport").onchange=async e=>{ const f=e.target.files[0]; e.target.value=""; if (!f) return;
@@ -1084,26 +1258,62 @@ window.addEventListener("online",()=>fetchWeather());
 document.addEventListener("visibilitychange",()=>{ if (document.visibilityState==="visible"&&S.ready){ fetchWeather(); if (S.tab==="today"&&$("#sheet").hidden) render(); } });
 window.addEventListener("popstate",()=>{ if (!$("#sheet").hidden){ const wasOb=!S.onboarded; closeSheet(); if (wasOb){ S.onboarded=true; kvSet("onboarded",true); } } });
 render();
+const KV_KEYS=["settings","profile","loc","weather","history","saved","dismissed","onboarded","taste","plan","colorReview","trends"];
+async function loadAll(){
+  const st=S.storage, snap=readSnap(), K={}; let items=[], photos=[], kvFail=[];
+  try{ await idb(); }catch{ st.ok=false; }
+  if (st.ok){
+    try{ const r=await itemsAll(); items=r.rows; st.badRecords+=r.bad; }catch{ st.badRecords++; st.itemsFailed=true; }
+    try{ const r=await photosAll(); photos=r.rows; st.badRecords+=r.bad; }catch{ st.badRecords++; }
+    for (const k of KV_KEYS){ try{ K[k]=await kvGet(k); }catch{ kvFail.push(k); st.badRecords++; } }
+  }
+  /* rebuild from the safety copy only when the database couldn't be read, never after a deliberate delete */
+  const broken=!st.ok||st.badRecords>0;
+  if (snap&&broken){
+    const have=new Set(items.map(i=>i.id)); const back=snap.items.filter(i=>!have.has(i.id)); items=items.concat(back); st.recovered=back.length;
+    const haveP=new Set(photos.map(p=>p.id)); photos=photos.concat(snap.photos.filter(p=>!haveP.has(p.id)));
+    for (const k of KV_KEYS) if ((kvFail.includes(k)||!st.ok)&&snap[k]!==undefined) K[k]=snap[k];
+    if (!st.ok){ for (const k of KV_KEYS) if (K[k]===undefined&&snap[k]!==undefined) K[k]=snap[k]; }
+  }
+  await files();
+  await Promise.all(items.map(i=>hydrate(i,ITEM_F))); await Promise.all(photos.map(p=>hydrate(p,PHOTO_F)));
+  if (Array.isArray(K.saved)) await Promise.all(K.saved.map(f=>hydrate(f,["inspoThumb"])));
+  st.lostPhotos=items.filter(i=>i.lost).length;
+  S.items=items.map(i=>({pinned:false,inWash:false,wearCount:0,added:0,warmth:2,form:1,fit:"regular",...i}));
+  for (const i of S.items){ if (i.cat==="shoes"&&!i.sub) i.sub="sneaker"; if (!i.colorName&&i.cat!=="jewelry") i.colorName=COL.nameHex(i.color||"#808080"); }
+  S.settings={...DEFAULT_SETTINGS,...(K.settings||{})}; S.profile={...DEFAULT_PROFILE,name:(K.profile||{}).name||""};
+  S.loc=K.loc||null; S.weather=K.weather||null; S.history=K.history||{wear:[],pairs:{}}; S.saved=K.saved||[]; S.dismissed=(K.dismissed||[]).filter(id=>/^[gt]-/.test(String(id)));
+  S.onboarded=!!K.onboarded||S.items.length>0||!!(snap&&snap.onboarded);
+  S.photos=photos; S.taste=K.taste||{w:{},n:0}; S.plan=K.plan||null; S.colorReview=K.colorReview||[]; S.trends=K.trends||null;
+  /* write the rebuilt state back so the database is whole again */
+  if (st.ok&&st.recovered){ try{ await itemsPut(S.items); for (const k of kvFail) if (K[k]!==undefined) await kvSet(k,K[k]); }catch{ st.ok=false; } }
+  /* migrate v4/v5 diary entries into the worn log */
+  let mig=false;
+  for (const e of S.photos){ let w=e.wearT&&S.history.wear.find(x=>x.t===e.wearT);
+    if (!w){ w={t:e.t,ids:e.itemIds||[],rating:e.rating||null,tags:e.tags||[],rated:!!e.rating,temp:null,fromMirror:true}; S.history.wear.push(w); e.wearT=w.t; mig=true; }
+    if (!w.photoId){ w.photoId=e.id; mig=true; if (!w.rating&&e.rating){ w.rating=e.rating; w.rated=true; w.tags=[...new Set([...(w.tags||[]),...(e.tags||[])])]; } } }
+  if (mig&&st.ok){ S.history.wear.sort((a,b)=>a.t-b.t); await saveHistory(); for (const e of S.photos) await photoPut(e); }
+  try{ st.persisted=navigator.storage&&navigator.storage.persisted?await navigator.storage.persisted():null;
+    if (st.persisted===false&&navigator.storage.persist) st.persisted=await navigator.storage.persist(); }catch{}
+  st.files=!!opfs;
+}
+/* move photos still stored inside the database (older versions) out into files, one piece at a time */
+async function migrateBlobs(){
+  if (!opfs||!canWrite()) return;
+  const todo=[...S.items.filter(i=>ITEM_F.some(f=>i[f] instanceof Blob&&!(i.files&&i.files[f]))), ...S.photos.filter(p=>PHOTO_F.some(f=>p[f] instanceof Blob&&!(p.files&&p.files[f])))];
+  for (const r of todo){ try{ if (S.items.includes(r)) await itemPut(r); else await photoPut(r); }catch{} await new Promise(res=>setTimeout(res,30)); }
+  if (S.saved.some(f=>f.inspoThumb instanceof Blob&&!(f.files&&f.files.inspoThumb))) await kvSet("saved",S.saved).catch(()=>{});
+}
 (async()=>{
-  try{
-    const [items,settings,profile,loc,weather,history,saved,dismissed,onboarded,photos,taste,plan,review]=await Promise.all([itemsAll(),kvGet("settings"),kvGet("profile"),kvGet("loc"),kvGet("weather"),kvGet("history"),kvGet("saved"),kvGet("dismissed"),kvGet("onboarded"),photosAll(),kvGet("taste"),kvGet("plan"),kvGet("colorReview")]);
-    S.items=(items||[]).map(i=>({pinned:false,inWash:false,wearCount:0,added:0,warmth:2,form:1,fit:"regular",...i}));
-    for (const i of S.items){ if (i.cat==="shoes"&&!i.sub) i.sub="sneaker"; if (!i.colorName&&i.cat!=="jewelry") i.colorName=COL.nameHex(i.color||"#808080"); }
-    S.settings={...DEFAULT_SETTINGS,...(settings||{})}; S.profile={...DEFAULT_PROFILE,name:(profile||{}).name||""};
-    S.loc=loc||null; S.weather=weather||null; S.history=history||{wear:[],pairs:{}}; S.saved=saved||[]; S.dismissed=(dismissed||[]).filter(id=>String(id).startsWith("g-")); S.onboarded=!!onboarded;
-    S.photos=photos||[]; S.taste=taste||{w:{},n:0}; S.plan=plan||null; S.colorReview=review||[];
-    /* migrate v4/v5 diary entries into the worn log */
-    let mig=false;
-    for (const e of S.photos){ let w=e.wearT&&S.history.wear.find(x=>x.t===e.wearT);
-      if (!w){ w={t:e.t,ids:e.itemIds||[],rating:e.rating||null,tags:e.tags||[],rated:!!e.rating,temp:null,fromMirror:true}; S.history.wear.push(w); e.wearT=w.t; mig=true; }
-      if (!w.photoId){ w.photoId=e.id; mig=true; if (!w.rating&&e.rating){ w.rating=e.rating; w.rated=true; w.tags=[...new Set([...(w.tags||[]),...(e.tags||[])])]; } } }
-    if (mig){ S.history.wear.sort((a,b)=>a.t-b.t); await saveHistory(); for (const e of S.photos) await photoPut(e); }
-  }catch{ toast("This browser blocked storage, so nothing will be saved. Open Daily Fit as an installed app."); }
+  try{ await loadAll(); }catch(e){ S.storage.ok=false; }
   applyTheme();
   let h=location.hash.slice(1); if (h==="settings") h="you"; if (["today","closet","shop","you"].includes(h)){ S.tab=h; document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-current",String(b.dataset.tab===h))); }
-  S.ready=true; render(); ensureThumbs();
+  S.ready=true; render(); snapshot(); ensureThumbs(); setTimeout(migrateBlobs,1500);
+  const st=S.storage;
+  if (!st.ok) toast("Storage problem: changes can't be saved right now. Close the app fully and reopen it.");
+  else if (st.recovered) toast(`Recovered ${st.recovered} piece${st.recovered>1?"s":""} after a storage error${st.lostPhotos?`; ${st.lostPhotos} photo${st.lostPhotos>1?"s":""} could not be recovered`:""}.`);
   if (!S.onboarded) onboarding(0);
-  fetchWeather();
+  fetchWeather(); fetchTrends().then(()=>{ if (S.tab!=="you"&&$("#sheet").hidden&&!S.feed) render(); });
   if (S.settings.aiEnabled&&AI) AI.load().then(afterAILoad).catch(()=>{});
   if (navigator.storage&&navigator.storage.persist) navigator.storage.persist().catch(()=>{});
   if ("serviceWorker" in navigator&&location.protocol!=="file:") navigator.serviceWorker.register("sw.js").catch(()=>{});

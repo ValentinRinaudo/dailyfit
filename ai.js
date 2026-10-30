@@ -79,10 +79,13 @@ async function embedTexts(arr){
   return arr.map(t => textCache.get(t));
 }
 /* garment recognition with honest confidence */
+/* emb can be one embedding or several views of the same piece (e.g. photo + cutout): their probabilities are averaged */
 async function recognize(emb, only=null){
   const labels = only ? LABELS.filter(x=>only.includes(x.c)) : LABELS;
   const TV=await embedTexts(labels.map(x=>`a photo of a ${x.l}`));
-  const P=softmax(TV.map(v=>cos(emb,v)));
+  const views = Array.isArray(emb) ? emb : [emb];
+  const Ps = views.map(e=>softmax(TV.map(v=>cos(e,v))));
+  const P = Ps[0].map((_,i)=>Ps.reduce((a,p)=>a+p[i],0)/Ps.length);
   const cat={}, kindBest={};
   labels.forEach((x,i)=>{ cat[x.c]=(cat[x.c]||0)+P[i]; if (!kindBest[x.c]||P[i]>kindBest[x.c].p) kindBest[x.c]={l:x.l,p:P[i]}; });
   const ranked=Object.entries(cat).sort((a,b)=>b[1]-a[1]);
