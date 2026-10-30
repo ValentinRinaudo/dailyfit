@@ -124,6 +124,7 @@ function snapshot(){
   try{ localStorage.setItem(SNAP,JSON.stringify({v:1,t:Date.now(),items:S.items.filter(i=>!i.virtual).map(stripItem),photos:S.photos.map(({photo,thumb,emb,...m})=>m),
     settings:S.settings,profile:S.profile,loc:S.loc,history:{wear:S.history.wear.slice(-300),pairs:S.history.pairs},saved:S.saved.map(({inspoThumb,...m})=>m),
     dismissed:S.dismissed,taste:S.taste,plan:S.plan,onboarded:S.onboarded})); }catch{}
+  if (cloud.cfg) cloudSoon();
 }
 const snapSoon=debounce(snapshot,1500);
 function readSnap(){ try{ const j=JSON.parse(localStorage.getItem(SNAP)||"null"); return j&&j.v===1?j:null; }catch{ return null; } }
@@ -625,6 +626,7 @@ function renderToday(v){
   const hours=c.hours.map(h=>`<div class="hr${c.window.includes(h.t)?" in":""}"><span>${h.t.slice(11,13)}</span><b>${deg(h.feels)}</b><span>${h.pop>=30?h.pop+"%":"&nbsp;"}</span></div>`).join("");
   const lockN=Object.keys(S.locks).length;
   v.innerHTML=`<div class="stack">
+    ${envBanner()}
     ${S.loc&&fc?seg("day",[[0,"Today"],[1,"Tomorrow"]],S.day,"dayseg"):""}
     <section class="wx">
       <div class="wx-main"><div class="wx-temp" id="tempOut">${fc?deg(c.nowFeels):deg(c.temp)}</div>
@@ -650,6 +652,7 @@ function renderToday(v){
   on("#unlock",()=>{ S.locks={}; render(); });
   on("#recreateBtn",startRecreate); on("#mirrorBtn",()=>startMirror());
   const rc=v.querySelector(".ratecard"); if (rc) bindRateCard(rc,pend);
+  bindEnvBanner(v);
 }
 /* only the fits area re-renders when you flip through fits, so it stays instant */
 function renderFits(F,c){
@@ -1174,7 +1177,8 @@ function renderYou(v){
       <div class="rowi"><span class="k">Units</span>${seg("units",[["C","°C"],["F","°F"]],st.units)}</div>
       <div class="rowi"><span class="k">Theme</span>${seg("theme",[["system","Auto"],["light","Light"],["dark","Dark"]],st.theme)}</div>
     </div></section>
-    <section><div class="group-title label">Your data stays on this phone <span id="storeUse"></span></div><div class="group">
+    <section><div class="group-title label">Your data <span id="storeUse"></span></div><div class="group">
+      <button type="button" class="rowi" id="cloudBtn"><div><div class="k">Cloud backup</div><div class="h" id="cloudLine">${esc(cloudLine())}</div></div><span class="chev"></span></button>
       <div class="rowi"><div><div class="k">Storage</div><div class="h">${storageLine()}</div></div>${S.storage.persisted===false?`<button type="button" class="btn quiet" id="persistBtn">Protect</button>`:""}</div>
       <button type="button" class="rowi" id="exportBtn"><div><div class="k">Back up</div><div class="h">${S.settings.lastBackup?"Last backup "+ago(S.settings.lastBackup):"Never backed up"}</div></div><span class="chev"></span></button>
       <button type="button" class="rowi" id="importBtn"><span class="k">Restore from backup</span><span class="chev"></span></button>
@@ -1195,7 +1199,7 @@ function renderYou(v){
   v.querySelectorAll("[data-units]").forEach(b=>b.onclick=()=>{ st.units=b.dataset.units; saveSettings(); renderYou(v); });
   v.querySelectorAll("[data-theme]").forEach(b=>b.onclick=()=>{ st.theme=b.dataset.theme; saveSettings(); applyTheme(); renderYou(v); });
   v.querySelectorAll("[data-best]").forEach(b=>b.onclick=()=>rateSheet(S.history.wear[+b.dataset.best]));
-  on("#exportBtn","onclick",exportData);
+  on("#exportBtn","onclick",exportData); on("#cloudBtn","onclick",cloudSheet);
   on("#persistBtn","onclick",async()=>{ try{ S.storage.persisted=await navigator.storage.persist(); }catch{} renderYou(v); toast(S.storage.persisted?"Storage protected.":"Chrome declined. Add Daily Fit to your home screen, then try again."); }); on("#importBtn","onclick",()=>$("#fileImport").click());
   on("#wipe","onclick",()=>confirmSheet("Delete your whole closet, photos, history and settings from this phone?","Delete everything",async()=>{ await kvClear(); location.reload(); }));
   if (navigator.storage&&navigator.storage.estimate) navigator.storage.estimate().then(e=>{ const el=$("#storeUse"); if (el) el.textContent=`· ${(e.usage/1048576).toFixed(0)} MB`; }).catch(()=>{});
@@ -1234,16 +1238,168 @@ $("#fileImport").onchange=async e=>{ const f=e.target.files[0]; e.target.value="
       location.reload(); });
   }catch{ toast("That file isn't a Daily Fit backup."); } };
 
+/* ================= cloud backup: a private GitHub repo only you can see =================
+   Every change syncs a few seconds later: state.json (closet, history, ratings, settings) plus each photo once.
+   If the phone ever loses its data, connecting again downloads everything back. */
+const CLOUD="dailyfit-cloud", UPKEY="dailyfit-cloud-uploaded";
+const cloud={cfg:null,state:"off",last:0,error:"",busy:false,dirty:false,sha:null,progress:null};
+function cloudLoad(){ try{ cloud.cfg=JSON.parse(localStorage.getItem(CLOUD)||"null"); cloud.last=+(localStorage.getItem(CLOUD+"-last")||0); }catch{} cloud.state=cloud.cfg?"idle":"off"; }
+function cloudSaveCfg(){ try{ if (cloud.cfg) localStorage.setItem(CLOUD,JSON.stringify(cloud.cfg)); else { localStorage.removeItem(CLOUD); localStorage.removeItem(UPKEY); localStorage.removeItem(CLOUD+"-last"); } }catch{} }
+const upSet=()=>{ try{ return new Set(JSON.parse(localStorage.getItem(UPKEY)||"[]")); }catch{ return new Set(); } };
+const upSave=set=>{ try{ localStorage.setItem(UPKEY,JSON.stringify([...set])); }catch{} };
+function ghURL(cfg,path){ return `${cfg.api||"https://api.github.com"}/repos/${cfg.repo}${path==null?"":"/contents/"+path.split("/").map(encodeURIComponent).join("/")}`; }
+async function gh(cfg,path,{method="GET",body=null,raw=false}={}){
+  return fetch(ghURL(cfg,path),{method,cache:"no-store",headers:{Authorization:`Bearer ${cfg.token}`,Accept:raw?"application/vnd.github.raw+json":"application/vnd.github+json",
+    "X-GitHub-Api-Version":"2022-11-28",...(body?{"Content-Type":"application/json"}:{})},body:body?JSON.stringify(body):null}); }
+async function ghErr(r){ let m=""; try{ m=(await r.json()).message||""; }catch{}
+  if (r.status===401) return "The token was refused. It may have expired or been mistyped.";
+  if (r.status===403) return "The token can't write to this repo. Give it Contents: Read and write on this repo.";
+  if (r.status===404) return "Repo not found, or the token can't see it.";
+  return `GitHub said ${r.status}${m?": "+m:""}`; }
+const b64=blob=>new Promise((res,rej)=>{ const fr=new FileReader(); fr.onload=()=>res(String(fr.result).split(",")[1]||""); fr.onerror=()=>rej(fr.error); fr.readAsDataURL(blob); });
+/* each photo keeps one name in the cloud for as long as it doesn't change on the phone */
+function cloudName(rec,f){ const o=(rec.files&&rec.files[f])||null, c=rec.cloudFiles&&rec.cloudFiles[f];
+  if (c&&c.o===o) return c.n; const n=o||`${rec.id||rec.t}.${f}.${uid()}`; (rec.cloudFiles||(rec.cloudFiles={}))[f]={o,n}; return n; }
+/* only originals go to the cloud; small thumbnails are rebuilt on the phone after a restore */
+const cloudFields=rec=>"cat" in rec?[rec.photo?"photo":"thumb","cut"]:"inspoThumb" in rec?["inspoThumb"]:[rec.photo?"photo":"thumb"];
+function cloudState(){
+  const fm=rec=>{ const out={}; for (const f of cloudFields(rec)) if (rec[f] instanceof Blob) out[f]=cloudName(rec,f); return out; };
+  return {app:"dailyfit",v:1,t:Date.now(),
+    items:S.items.filter(i=>!i.virtual).map(it=>{ const {cloudFiles,lost,files,...m}=stripItem(it); return {...m,files:fm(it)}; }),
+    photos:S.photos.map(e=>{ const {photo,thumb,emb,cloudFiles,lost,files,...m}=e; return {...m,files:fm(e)}; }),
+    saved:S.saved.map(f=>{ const {inspoThumb,cloudFiles,files,...m}=f; return {...m,files:fm(f)}; }),
+    settings:S.settings,profile:S.profile,loc:S.loc,history:S.history,dismissed:S.dismissed,taste:S.taste,plan:S.plan,onboarded:true};
+}
+function renderCloud(){ const el=document.getElementById("cloudLine"); if (el) el.textContent=cloudLine(); }
+function cloudLine(){ if (!cloud.cfg) return "Off: if Chrome clears this phone, your closet is gone. Set it up once.";
+  if (cloud.progress) return `Backing up photos… ${cloud.progress.done} of ${cloud.progress.total}`;
+  if (cloud.busy) return "Syncing…";
+  if (cloud.state==="error") return "Problem: "+cloud.error;
+  return `On · ${cloud.cfg.repo} · ${cloud.last?"synced "+ago(cloud.last):"waiting to sync"}${cloud.dirty?" · changes pending":""}`; }
+async function cloudPush(){
+  if (!cloud.cfg||!S.ready||!canWrite()) return;
+  if (cloud.busy){ cloud.dirty=true; return; }
+  if (!navigator.onLine){ cloud.dirty=true; renderCloud(); return; }
+  cloud.busy=true; cloud.dirty=false; cloud.state="syncing"; renderCloud();
+  try{
+    const up=upSet(), todo=[], seenN=new Set();
+    const collect=(rec,fields)=>{ for (const f of fields){ const b=rec[f]; if (!(b instanceof Blob)) continue; const n=cloudName(rec,f); if (!up.has(n)&&!seenN.has(n)){ seenN.add(n); todo.push([n,b]); } } };
+    S.items.filter(i=>!i.virtual).forEach(it=>collect(it,cloudFields(it))); S.photos.forEach(p=>collect(p,cloudFields(p))); S.saved.forEach(f=>collect(f,["inspoThumb"]));
+    let i=0;
+    for (const [n,b] of todo){ cloud.progress={done:i,total:todo.length}; renderCloud();
+      const r=await gh(cloud.cfg,"img/"+n,{method:"PUT",body:{message:"Daily Fit photo",content:await b64(b)}});
+      if (r.ok||r.status===422) up.add(n); else throw new Error(await ghErr(r));
+      i++; if (i%4===0) upSave(up);
+      await new Promise(res=>setTimeout(res,cloud.cfg.api?0:800)); }   /* GitHub allows ~80 uploads a minute */
+    upSave(up); cloud.progress=null;
+    const content=await b64(new Blob([JSON.stringify(cloudState())],{type:"application/json"}));
+    const put=sha=>gh(cloud.cfg,"state.json",{method:"PUT",body:{message:"Daily Fit sync",content,...(sha?{sha}:{})}});
+    let r=await put(cloud.sha);
+    if (r.status===409||r.status===422){ const g=await gh(cloud.cfg,"state.json"); cloud.sha=g.ok?(await g.json()).sha:null; r=await put(cloud.sha); }
+    if (!r.ok) throw new Error(await ghErr(r));
+    cloud.sha=(await r.json()).content.sha; cloud.last=Date.now(); try{ localStorage.setItem(CLOUD+"-last",String(cloud.last)); }catch{}
+    cloud.state="ok"; cloud.error="";
+  }catch(e){ cloud.state="error"; cloud.error=String((e&&e.message)||e).slice(0,140); if (/Failed to fetch|NetworkError|network/i.test(cloud.error)){ cloud.error="No connection. It will retry."; cloud.dirty=true; } }
+  finally{ cloud.busy=false; cloud.progress=null; renderCloud(); if (cloud.dirty) cloudSoon(); }
+}
+const cloudSoon=debounce(()=>cloudPush(),6000);
+/* download a backup and replace this phone's data with it */
+async function cloudRestore(cfg,onStep=()=>{}){
+  onStep("Reading your backup…");
+  const r=await gh(cfg,"state.json",{raw:true}); if (r.status===404) throw new Error("This repo has no Daily Fit backup yet."); if (!r.ok) throw new Error(await ghErr(r));
+  const st=await r.json(); if (!st||st.app!=="dailyfit") throw new Error("That file isn't a Daily Fit backup.");
+  const jobs=[]; const add=(rec,fields)=>{ const fm=rec.files||{}; rec.cloudFiles={}; for (const f of fields) if (fm[f]) jobs.push([rec,f,fm[f]]); delete rec.files; };
+  st.items.forEach(it=>add(it,ITEM_F)); (st.photos||[]).forEach(p=>add(p,PHOTO_F)); (st.saved||[]).forEach(f=>add(f,["inspoThumb"]));
+  const up=new Set(); let i=0, missing=0;
+  for (const [rec,f,n] of jobs){ onStep(`Downloading photos ${++i} of ${jobs.length}`);
+    try{ const g=await gh(cfg,"img/"+n,{raw:true}); if (g.ok){ rec[f]=await g.blob(); rec.cloudFiles[f]={o:null,n}; up.add(n); } else missing++; }catch{ missing++; } }
+  onStep("Saving on this phone…");
+  S.storage.ok=true; await kvClear();
+  for (const it of st.items){ await itemPut(it); for (const f of Object.keys(it.cloudFiles)) it.cloudFiles[f].o=it.files&&it.files[f]||null; await itemPut(it); }
+  for (const p of (st.photos||[])){ await photoPut(p); for (const f of Object.keys(p.cloudFiles)) p.cloudFiles[f].o=p.files&&p.files[f]||null; await photoPut(p); }
+  for (const k of ["settings","profile","loc","history","dismissed","taste","plan"]) if (st[k]!==undefined) await kvSet(k,st[k]);
+  await kvSet("saved",st.saved||[]); await kvSet("onboarded",true);
+  cloud.cfg=cfg; cloudSaveCfg(); upSave(up); try{ localStorage.setItem(CLOUD+"-last",String(Date.now())); }catch{}
+  return {items:st.items.length, missing, t:st.t};
+}
+async function cloudCheck(cfg){
+  const r=await gh(cfg,null); if (!r.ok) throw new Error(await ghErr(r));
+  const j=await r.json(); if (j.private===false) throw new Error("This repo is public, so your photos would be visible to anyone. Make it private on GitHub first.");
+  const s=await gh(cfg,"state.json",{raw:true}); let remote=null; if (s.ok){ try{ remote=await s.json(); }catch{} }
+  return remote;
+}
+function cloudSheet(){
+  const user=(location.hostname.match(/^([^.]+)\.github\.io$/)||[])[1]||"you";
+  const cfg=cloud.cfg||{repo:`${user}/dailyfit-data`,token:""};
+  const on=!!cloud.cfg;
+  const p=openSheet(`<div class="row between"><h2>Cloud backup</h2><button type="button" class="btn quiet" id="x">Close</button></div>
+    ${on?`<div class="notice solid" id="cloudLine">${esc(cloudLine())}</div>
+      <div class="row"><button type="button" class="btn primary" id="cNow">Sync now</button><button type="button" class="btn quiet" id="cOff">Turn off</button></div>
+      <p class="hint">Keep your token in your password manager. On a new or wiped phone, open Daily Fit, tap "Restore my closet" and paste it.</p>`:
+    `<p>Your closet, photos, history and ratings sync automatically to a <b>private</b> GitHub repo that only you can see. If this phone ever loses its data, you paste one key and everything comes back.</p>
+    <ol class="setup">
+      <li><a href="https://github.com/new?name=dailyfit-data&visibility=private&description=Daily%20Fit%20backup" target="_blank" rel="noopener">Create a private repo ${IC.ext}</a> named <b>dailyfit-data</b>.</li>
+      <li><a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">Create a token ${IC.ext}</a>: Repository access → <i>Only select repositories</i> → dailyfit-data. Permissions → <i>Contents</i> → Read and write. Expiration → No expiration.</li>
+      <li>Paste it below and save a copy in your password manager.</li></ol>`}
+    <div class="field"><label class="label" for="cRepo">Repo</label><input type="text" id="cRepo" value="${esc(cfg.repo)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+    <div class="field"><label class="label" for="cTok">Token</label><input type="password" id="cTok" value="${esc(cfg.token)}" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+    <div class="row"><button type="button" class="btn accent" id="cGo">${on?"Save":"Connect and back up"}</button><button type="button" class="btn" id="cRest">Restore from this repo</button></div>
+    <p class="hint" id="cMsg"></p>`,{full:true});
+  const msg=t=>{ p.querySelector("#cMsg").textContent=t; };
+  const read=()=>({repo:p.querySelector("#cRepo").value.trim().replace(/^https?:\/\/github\.com\//,"").replace(/\/$/,""),token:p.querySelector("#cTok").value.trim(),...(cloud.cfg&&cloud.cfg.api?{api:cloud.cfg.api}:{})});
+  p.querySelector("#x").onclick=closeSheet;
+  const nowB=p.querySelector("#cNow"); if (nowB) nowB.onclick=()=>{ cloudPush(); };
+  const offB=p.querySelector("#cOff"); if (offB) offB.onclick=()=>confirmSheet("Stop syncing to GitHub? The backup already in the repo stays there.","Turn off",()=>{ cloud.cfg=null; cloud.state="off"; cloudSaveCfg(); render(); });
+  p.querySelector("#cGo").onclick=async()=>{ const c=read(); if (!/^[\w.-]+\/[\w.-]+$/.test(c.repo)||!c.token){ msg("Fill in the repo (name/repo) and the token."); return; }
+    msg("Checking…");
+    try{ const remote=await cloudCheck(c);
+      const go=async()=>{ cloud.cfg=c; cloudSaveCfg(); cloud.sha=null; closeSheet(); toast("Cloud backup on. Uploading your closet…"); await cloudPush(); if (cloud.state==="ok") toast("Backed up to GitHub."); else toast(cloud.error||"Backup failed."); render(); };
+      if (remote&&remote.items&&remote.items.length>S.items.length){ confirmSheet(`This repo already has a backup with ${remote.items.length} pieces (from ${fmtDay(remote.t)}). Replace it with this phone's ${S.items.length}? To get it back instead, tap Cancel, then Restore.`,"Replace backup",go); return; }
+      await go();
+    }catch(e){ msg(String(e.message||e)); } };
+  p.querySelector("#cRest").onclick=async()=>{ const c=read(); if (!c.token){ msg("Paste your token first."); return; }
+    const run=async()=>{ busySheet("Restoring your closet…");
+      try{ const r=await cloudRestore(c,setBusy); setBusy(`Restored ${r.items} pieces${r.missing?`; ${r.missing} photos missing`:""}. Reloading…`); setTimeout(()=>location.reload(),900); }
+      catch(e){ closeSheet(); toast(String(e.message||e)); } };
+    if (S.items.length) confirmSheet(`Replace this phone's closet (${S.items.length} pieces) with the backup from GitHub?`,"Restore",run); else run(); };
+}
+function restoreSheet(){
+  const p=openSheet(`<div class="row between"><h2>Restore my closet</h2><button type="button" class="btn quiet" id="x">Close</button></div>
+    <button type="button" class="btn primary block" id="rGh">From my GitHub backup</button>
+    <button type="button" class="btn block" id="rFile">From a backup file</button>
+    <p class="hint">The GitHub backup needs the token you saved when you set it up.</p>`);
+  p.querySelector("#x").onclick=closeSheet; p.querySelector("#rGh").onclick=()=>cloudSheet(); p.querySelector("#rFile").onclick=()=>{ closeSheet(); $("#fileImport").click(); };
+}
+
+/* ================= where the app is running: some places keep data only briefly ================= */
+const UA=navigator.userAgent;
+const inAppBrowser=()=>/; wv\)|KAKAOTALK|Instagram|FBAN|FBAV|Line\/|NAVER\(inapp|DaumApps|everytimeApp|Snapchat|Twitter|TikTok|BytedanceWebview/i.test(UA);
+const installed=()=>matchMedia("(display-mode: standalone)").matches||navigator.standalone===true;
+let installEvt=null; window.addEventListener("beforeinstallprompt",e=>{ e.preventDefault(); installEvt=e; if (S.ready&&S.tab==="today") render(); });
+window.addEventListener("appinstalled",()=>{ installEvt=null; toast("Installed. Open Daily Fit from your home screen from now on."); });
+function envBanner(){
+  if (inAppBrowser()) return `<div class="notice solid warnbox"><b>You're inside another app's browser.</b> What you save here is kept separately and can disappear. Open Daily Fit in Chrome instead (⋮ → Open in Chrome), then install it.<div class="row"><button type="button" class="btn quiet" id="copyLink">Copy link</button></div></div>`;
+  if (!cloud.cfg&&S.items.length>=3&&!S.settings.cloudNudgeOff) return `<div class="notice solid"><b>Protect your closet.</b> Turn on cloud backup so a cleared phone can't erase it.<div class="row"><button type="button" class="btn accent" id="cloudSet">Set up backup</button>${installEvt&&!installed()?`<button type="button" class="btn quiet" id="installBtn">Install app</button>`:""}<button type="button" class="linkbtn" id="cloudLater">Not now</button></div></div>`;
+  if (installEvt&&!installed()) return `<div class="notice solid"><b>Install Daily Fit</b> so Chrome keeps your data and it opens like an app.<div class="row"><button type="button" class="btn accent" id="installBtn">Install</button></div></div>`;
+  return "";
+}
+function bindEnvBanner(v){
+  const on=(id,fn)=>{ const el=v.querySelector(id); if (el) el.onclick=fn; };
+  on("#copyLink",async()=>{ try{ await navigator.clipboard.writeText(location.origin+location.pathname); toast("Link copied. Paste it into Chrome."); }catch{ toast(location.origin+location.pathname); } });
+  on("#cloudSet",cloudSheet); on("#cloudLater",()=>{ S.settings.cloudNudgeOff=true; saveSettings(); render(); });
+  on("#installBtn",async()=>{ if (!installEvt) return; installEvt.prompt(); try{ await installEvt.userChoice; }catch{} installEvt=null; render(); });
+}
+
 /* ================= onboarding ================= */
 function onboarding(step=0){
   const dots=`<div class="steps">${[0,1,2,3].map(i=>`<span class="${i<=step?"on":""}"></span>`).join("")}</div>`; let html="";
-  if (step===0) html=`${dots}<div class="hero">Your closet.<br>Today's weather.<br>Fits that work.</div><p>Photograph what you own once. Every morning Daily Fit builds a set of varied fits for the forecast, and learns what you like.</p><p class="muted small">Everything stays on this phone. No account, no cost.</p><button type="button" class="btn accent block" id="next">Get started</button>`;
+  if (step===0) html=`${dots}<div class="hero">Your closet.<br>Today's weather.<br>Fits that work.</div><p>Photograph what you own once. Every morning Daily Fit builds a set of varied fits for the forecast, and learns what you like.</p><p class="muted small">No account, no cost. Optional free backup to your own GitHub.</p><button type="button" class="btn accent block" id="next">Get started</button><button type="button" class="btn block" id="obRestore">I've used Daily Fit before: restore my closet</button>`;
   if (step===1) html=`${dots}<h1>Where are you?</h1><p class="muted">For the forecast and nearby stores.</p><button type="button" class="btn primary block" id="gps">Use my location</button><button type="button" class="btn block" id="search">Search a city</button><button type="button" class="linkbtn" id="next">Skip, I'll set the temperature myself</button>${S.loc?`<p class="small">Location: <strong>${esc(S.loc.name)}</strong></p><button type="button" class="btn accent block" id="next2">Continue</button>`:""}`;
   if (step===2) html=`${dots}<h1>Turn on the fashion AI?</h1><p>It cuts your photos out cleanly, recognises each piece and its colour, recreates inspo fits and reads mirror pics.</p><p class="muted small">Runs on your phone. One-time download of about 200 MB, best on Wi-Fi.</p><button type="button" class="btn accent block" id="aiYes">Turn it on</button><button type="button" class="linkbtn" id="next">Not now</button>`;
   if (step===3) html=`${dots}<h1>Add your first pieces</h1><p>Start with what you wear most: a few tops, trousers, shoes, a jacket, your everyday jewellery. Pick several photos at once and tag them in a row.</p><button type="button" class="btn primary block" id="obLib">Pick photos</button><button type="button" class="btn block" id="obCam">Take a photo</button><button type="button" class="linkbtn" id="done">Look around first</button>`;
   const p=openSheet(html,{full:true}), go=n=>onboarding(n);
   const on=(id,fn)=>{ const el=p.querySelector(id); if (el) el.onclick=fn; };
-  on("#next",()=>go(step+1)); on("#next2",()=>go(step+1));
+  on("#next",()=>go(step+1)); on("#next2",()=>go(step+1)); on("#obRestore",()=>restoreSheet());
   on("#gps",async()=>{ if (await useGPS()) go(2); });
   on("#search",()=>{ locationSheet(); const back=new MutationObserver(()=>{ if ($("#sheet").hidden){ back.disconnect(); go(S.loc?2:1); } }); back.observe($("#sheet"),{attributes:true,attributeFilter:["hidden"]}); });
   on("#aiYes",()=>{ enableAI(); go(3); });
@@ -1308,7 +1464,11 @@ async function migrateBlobs(){
   try{ await loadAll(); }catch(e){ S.storage.ok=false; }
   applyTheme();
   let h=location.hash.slice(1); if (h==="settings") h="you"; if (["today","closet","shop","you"].includes(h)){ S.tab=h; document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-current",String(b.dataset.tab===h))); }
+  cloudLoad();
   S.ready=true; render(); snapshot(); ensureThumbs(); setTimeout(migrateBlobs,1500);
+  if (cloud.cfg) setTimeout(cloudPush,4000);
+  document.addEventListener("visibilitychange",()=>{ if (document.visibilityState==="hidden"&&cloud.cfg&&cloud.dirty) cloudPush(); });
+  window.addEventListener("online",()=>{ if (cloud.cfg&&cloud.dirty) cloudPush(); });
   const st=S.storage;
   if (!st.ok) toast("Storage problem: changes can't be saved right now. Close the app fully and reopen it.");
   else if (st.recovered) toast(`Recovered ${st.recovered} piece${st.recovered>1?"s":""} after a storage error${st.lostPhotos?`; ${st.lostPhotos} photo${st.lostPhotos>1?"s":""} could not be recovered`:""}.`);

@@ -358,3 +358,5 @@ a.btn{text-decoration:none;color:var(--ink)}
 .gap-art{overflow:hidden}.gap-art img{width:100%;height:100%;object-fit:cover}
 .seenin{font-size:12.5px;color:var(--muted);text-decoration:none;display:flex;gap:6px;align-items:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .seenin .icon{flex:0 0 auto;width:14px;height:14px}
+.warnbox{border-color:var(--bad)}
+ol.setup{padding-left:20px;display:grid;gap:8px;margin:0}ol.setup a{font-weight:650;color:var(--accent)}
