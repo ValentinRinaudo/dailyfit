@@ -598,7 +598,7 @@ const avatarHTML=()=>initials()?esc(initials()):PERSON;
 /* ================= navigation ================= */
 function setTab(t){ if (t==="settings") t="you";
   const go=()=>{ S.tab=t; document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-current",String(b.dataset.tab===t))); try{ history.replaceState(history.state,"","#"+t); }catch{} render(); window.scrollTo(0,0); };
-  if (document.startViewTransition&&!matchMedia("(prefers-reduced-motion: reduce)").matches) document.startViewTransition(go); else go(); }
+  if (document.startViewTransition&&!matchMedia("(prefers-reduced-motion: reduce)").matches) { const vt=document.startViewTransition(go); [vt.ready,vt.finished,vt.updateCallbackDone].forEach(x=>x&&x.catch(()=>{})); } else go(); }
 function render(){
   const v=$("#view");
   $("#dateLabel").textContent=new Date().toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long"});

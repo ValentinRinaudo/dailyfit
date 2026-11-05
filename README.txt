@@ -1,18 +1,26 @@
-DAILY FIT — standalone streetwear wardrobe app (installable web app)
+DAILY FIT — streetwear wardrobe app (installable web app)
 
-Everything runs on your phone. No account, no AI, no cost.
-Network is used only for the free Open-Meteo weather forecast and city search.
-Your closet, photos and history are stored on the phone (back up from Settings > Your data).
+Live at https://valentinrinaudo.github.io/dailyfit/ (GitHub Pages).
 
-INSTALL ON ANDROID (one-time, about 5 minutes)
-The app must be served over https once so Chrome can install it. Free option: GitHub Pages.
- 1. Create a free account at github.com (skip if you have one).
- 2. New repository > name it "dailyfit" > Public > Create.
- 3. "uploading an existing file" > drag in ALL files from this zip > Commit.
- 4. Settings > Pages > Source: "Deploy from a branch" > Branch: main, folder / (root) > Save.
- 5. After about a minute your app is live at https://<your-username>.github.io/dailyfit/
- 6. Open that link in Chrome on your phone > menu (three dots) > "Install app" (or "Add to Home screen").
-It now opens from your home screen like any app and works offline (weather needs a connection).
+Your closet, photos, history and ratings are saved online in your Daily Fit account (Supabase,
+free tier), so they are there on any phone or computer you log in on. Every account can only read
+and write its own data; the database rules are in supabase.sql. The phone also keeps a local copy
+so the app opens offline.
 
-UPDATING TREND DATA
-Trends and stores live in data.js (compiled October 2026). Replace that file in your repository to update them.
+Network use: your account, the free Open-Meteo forecast and city search, and an optional
+one-time download of the on-device fashion AI (about 200 MB).
+
+INSTALL ON ANDROID
+Open the link above in Chrome > menu (three dots) > "Install app" (or "Add to Home screen").
+Updates appear the next time you open the app while online.
+
+HOW FITS ARE CHOSEN
+The forecast's "feels like" temperature over your outing hours sets how many layers a fit needs
+(25°+ one light layer; 13–18° a layer or light jacket; 6–12° a real jacket; ≤0° a heavy coat over a
+layer). If the day swings by 7° or more, the fit includes a layer you can take off. You can shift
+this with "You run warm/cold" in the You tab. Among the fits that suit the weather, the app learns
+from what you wear, skip and rate.
+
+TREND DATA
+Trends and stores live in data.js; a weekly job (trends-job.mjs) publishes fresh trends to
+data/trends.json, which the app reads when online.
