@@ -81,6 +81,13 @@ const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] 
 async function textVecs(arr) { const out = []; for (let i = 0; i < arr.length; i += 32) { const enc = tok(arr.slice(i, i + 32), { padding: "max_length", max_length: 77, truncation: true }); const { text_embeds: t } = await txt(enc); const d = t.dims[1]; for (let j = 0; j < t.dims[0]; j++) out.push(norm(t.data.slice(j * d, (j + 1) * d))); } return out; }
 const softmax = xs => { const l = xs.map(x => x * 100), m = Math.max(...l), e = l.map(x => Math.exp(x - m)), z = e.reduce((a, b) => a + b, 0); return e.map(x => x / z); };
 
+/* ---------- keep the free database awake (Supabase pauses projects after a week without requests) ---------- */
+try {
+  const cfg = fs.existsSync("config.js") ? fs.readFileSync("config.js", "utf8") : "";
+  const url = (cfg.match(/supabaseUrl:\s*"([^"]+)"/) || [])[1], key = (cfg.match(/supabaseKey:\s*"([^"]+)"/) || [])[1];
+  if (url && key) { const r = await fetch(url + "/rest/v1/rpc/ping", { method: "POST", headers: { apikey: key, "Content-Type": "application/json" }, body: "{}", signal: AbortSignal.timeout(15000) }); console.log("database ping:", r.status); }
+} catch (e) { console.log("database ping failed:", String(e.message || e).slice(0, 80)); }
+
 /* ---------- main ---------- */
 const now = Date.now(), weekStart = t => { const d = new Date(t); d.setUTCHours(0, 0, 0, 0); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
 fs.mkdirSync("data", { recursive: true });

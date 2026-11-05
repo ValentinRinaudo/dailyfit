@@ -1,6 +1,6 @@
 /* Daily Fit service worker: app shell offline, fonts cached on first use, weather always live. */
-const VERSION = "dailyfit-v6.3.0";
-const SHELL = ["./", "index.html", "styles.css", "app.js", "ai.js", "ai-worker.js", "data.js", "color.js", "art.js", "manifest.webmanifest",
+const VERSION = "dailyfit-v7.0.0";
+const SHELL = ["./", "index.html", "styles.css", "app.js", "ai.js", "ai-worker.js", "config.js", "data.js", "color.js", "art.js", "manifest.webmanifest",
   "icon-192.png", "icon-512.png", "maskable-512.png"];
 
 self.addEventListener("install", e => {
@@ -13,6 +13,7 @@ self.addEventListener("activate", e => {
 self.addEventListener("fetch", e => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET") return;
+  if (url.hostname.endsWith("supabase.co")) return;                  // your account data: always live
   if (url.hostname.endsWith("open-meteo.com")) return;              // live data, handled by the app
   if (url.pathname.includes("/data/")) return;                       // daily trend data: always fresh from the network
   const lib = url.hostname === "cdn.jsdelivr.net";
