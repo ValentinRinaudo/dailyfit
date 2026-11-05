@@ -1,7 +1,7 @@
 /* Daily Fit 5 — image-led, calm surfaces, one cobalt accent.
    Wide Archivo for headlines, regular Archivo for reading, Plex Mono for small data. Phone-first. */
 :root{
-  --bg:#F3F3F1; --surface:#FFFFFF; --sunk:#EBEBE8; --ink:#111111; --muted:#6A6B66; --line:#E2E2DE; --line2:#CFCFCA;
+  --bg:#F3F3F1; --surface:#FFFFFF; --sunk:#EBEBE8; --ink:#111111; --muted:#5F605B; --line:#E2E2DE; --line2:#CFCFCA;
   --accent:#2340D4; --accent-ink:#FFFFFF; --accent-soft:#E6EAFC; --good:#1F7A46; --bad:#B42F2F; --scrim:rgba(10,10,10,.45);
   --silver1:#F4F5F7; --silver2:#9EA3AB;
   --r:16px; --r-sm:10px; --shadow:0 1px 2px rgba(0,0,0,.04),0 6px 24px rgba(0,0,0,.06);
@@ -13,11 +13,11 @@
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --bg:#0B0B0B; --surface:#161616; --sunk:#1E1E1E; --ink:#EEEEEA; --muted:#9B9C96; --line:#242424; --line2:#333333;
-  --accent:#8597FF; --accent-ink:#0B0F26; --accent-soft:#1B2142; --good:#6CC08E; --bad:#EC8686; --scrim:rgba(0,0,0,.6);
+  --accent:#8597FF; --accent-ink:#0B0F26; --accent-soft:#1B2142; --good:#6CC08E; --good-ink:#0B1A11; --bad:#EC8686; --scrim:rgba(0,0,0,.6);
   --silver1:#DADDE2; --silver2:#6E737B; --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.35); color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0B0B0B; --surface:#161616; --sunk:#1E1E1E; --ink:#EEEEEA; --muted:#9B9C96; --line:#242424; --line2:#333333;
-  --accent:#8597FF; --accent-ink:#0B0F26; --accent-soft:#1B2142; --good:#6CC08E; --bad:#EC8686; --scrim:rgba(0,0,0,.6);
+  --accent:#8597FF; --accent-ink:#0B0F26; --accent-soft:#1B2142; --good:#6CC08E; --good-ink:#0B1A11; --bad:#EC8686; --scrim:rgba(0,0,0,.6);
   --silver1:#DADDE2; --silver2:#6E737B; --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.35); color-scheme:dark}
 
 *{box-sizing:border-box}
@@ -40,6 +40,7 @@ a{color:var(--accent)}
 button,input,select{font:inherit;color:inherit}
 button{cursor:pointer;touch-action:manipulation}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.panel:focus{outline:none}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .between{justify-content:space-between}
 .stack{display:flex;flex-direction:column;gap:18px}
@@ -308,7 +309,7 @@ button.rowi:last-child{border-bottom:0}
 .mini4{display:grid;grid-template-columns:1fr 1fr;gap:3px}
 .mini4 .ph{border-radius:8px;aspect-ratio:1/1}
 .fc-title{font-size:12.5px;font-weight:650;line-height:1.25;padding:0 2px 2px}
-.badge.new{background:var(--good);color:#fff}
+.badge.new{background:var(--good);color:var(--good-ink,#fff)}
 .swatches{display:flex;flex-wrap:wrap;gap:8px}
 .swatch{width:32px;height:32px;border-radius:50%;border:1px solid var(--line2);padding:0;transition:transform .15s}
 .swatch.on{outline:2.5px solid var(--accent);outline-offset:2px;transform:scale(1.06)}
@@ -329,7 +330,8 @@ button.rowi:last-child{border-bottom:0}
 .gap-top{display:flex;gap:12px;align-items:center}
 .gap-art{flex:0 0 96px;aspect-ratio:1/1;border-radius:14px;background:var(--sunk);display:grid;place-items:center}
 .gap-body{min-width:0;display:grid;gap:2px}
-.gap-body h3{margin:0;font-size:16px}
+.gap-body h3,.gap-body h2{margin:0;font-size:16px;font-stretch:100%;font-weight:700}
+.vh{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .metric{margin:2px 0 0;font-size:14px}.metric b{font-size:18px}
 .trendtag{color:var(--accent)}
 .ctl{display:grid;gap:6px;border-top:1px solid var(--line);padding-top:10px}
