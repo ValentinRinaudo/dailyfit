@@ -1038,7 +1038,7 @@ async function commit(){
     if (isNew&&S.queue.length){ toast("Added."); nextInQueue(); } else { render(); toast(isNew?"Added to your closet.":"Saved."); if (isNew) S.presets=null; }
   }catch(e){ toast(e&&e.name==="QuotaExceededError"?"This phone is out of storage for photos. Remove a few pieces first.":"Couldn't save. Try again."); }
 }
-async function removeItem(it){ try{ await itemDel(it.id); dropURLs(it.id); S.items=S.items.filter(x=>x.id!==it.id); for (const [k,id] of Object.entries(S.locks)) if (id===it.id) delete S.locks[k];
+async function removeItem(it){ try{ await itemDel(it.id); dropURLs(it.id); S.items=S.items.filter(x=>x.id!==it.id); if (!S.items.some(i=>!i.virtual)) cloud.allowEmpty=true; for (const [k,id] of Object.entries(S.locks)) if (id===it.id) delete S.locks[k];
   cleanupDraft(); closetChanged(); render(); toast("Removed."); }catch{ toast("Couldn't remove. Try again."); } }
 
 /* ================= SHOP: what to buy next, ranked by what it unlocks ================= */
@@ -1231,7 +1231,7 @@ async function exportData(){
 }
 $("#fileImport").onchange=async e=>{ const f=e.target.files[0]; e.target.value=""; if (!f) return;
   try{ const d=JSON.parse(await f.text()); if (d.app!=="dailyfit"||!Array.isArray(d.items)) throw 0;
-    confirmSheet(`Replace this phone's closet with the backup (${d.items.length} pieces)?`,"Restore",async()=>{ await kvClear();
+    confirmSheet(`Replace this phone's closet with the backup (${d.items.length} pieces)?`,"Restore",async()=>{ cloud.hold=true; await kvClear();
       await itemsPut(await Promise.all(d.items.map(async it=>({...it,photo:await u2b(it.photo),thumb:await u2b(it.thumb),cut:await u2b(it.cut)}))));
       for (const p of (d.photos||d.diary||[])) await photoPut({...p,photo:await u2b(p.photo),thumb:await u2b(p.thumb)});
       await Promise.all([kvSet("settings",{...DEFAULT_SETTINGS,...d.settings}),kvSet("profile",{...DEFAULT_PROFILE,name:(d.profile||{}).name||""}),kvSet("loc",d.loc||null),kvSet("history",d.history||{wear:[],pairs:{}}),
@@ -1303,7 +1303,9 @@ function cloudLine(){
   const who=be===SB?(cloud.user.email||"your account"):cloud.ghCfg.repo;
   return `${who} · ${cloud.last?"saved online "+ago(cloud.last):"waiting to save"}${cloud.dirty?" · changes pending":""}`; }
 async function cloudPush(){
-  if (!be||!S.ready||!canWrite()) return;
+  if (!be||!S.ready||!canWrite()||cloud.hold) return;
+  /* never replace a closet that has pieces online with an empty one (that is how the online closet was lost) */
+  if (!S.items.some(i=>!i.virtual)&&(cloud.remoteN||0)>0&&!cloud.allowEmpty) return;
   if (cloud.busy){ cloud.dirty=true; return; }
   if (!navigator.onLine){ cloud.dirty=true; renderCloud(); return; }
   cloud.busy=true; cloud.dirty=false; cloud.state="syncing"; renderCloud();
@@ -1316,7 +1318,7 @@ async function cloudPush(){
       await be.putFile(n,b); up.add(n); i++; if (i%4===0) upSave(up);
       if (be.pace) await new Promise(res=>setTimeout(res,be.pace)); }
     upSave(up); cloud.progress=null;
-    const st=cloudState(); await be.putState(st);
+    const st=cloudState(); await be.putState(st); cloud.remoteN=st.items.length; cloud.allowEmpty=false;
     lsSet(SYNCT,st.t); cloud.last=Date.now(); lsSet(GHKEY+"-last",cloud.last); cloud.state="ok"; cloud.error="";
   }catch(e){ cloud.state="error"; cloud.error=String((e&&e.message)||e).slice(0,140); if (/Failed to fetch|NetworkError|network|Load failed/i.test(cloud.error)){ cloud.error="No connection. It will retry."; cloud.dirty=true; } }
   finally{ cloud.busy=false; cloud.progress=null; renderCloud(); if (cloud.dirty) cloudSoon(); }
@@ -1325,6 +1327,7 @@ const cloudSoon=debounce(()=>cloudPush(),3000);
 /* replace this device's copy with what's online, photos included, then reload */
 async function pullState(st,src,onStep=()=>{}){
   if (!st||st.app!=="dailyfit") throw new Error("That isn't a Daily Fit backup.");
+  cloud.hold=true;   /* stays on until the reload; nothing may be saved online while the closet is half-downloaded */
   const jobs=[]; const add=(rec,fields)=>{ const fm=rec.files||{}; rec.cloudFiles={}; for (const f of fields) if (fm[f]) jobs.push([rec,f,fm[f]]); delete rec.files; };
   st.items.forEach(it=>add(it,ITEM_F)); (st.photos||[]).forEach(p=>add(p,PHOTO_F)); (st.saved||[]).forEach(f=>add(f,["inspoThumb"]));
   const up=new Set(); let done=0, missing=0, next=0;
@@ -1351,7 +1354,7 @@ function useInMemory(st){
   S.photos=st.photos||[]; S.settings={...DEFAULT_SETTINGS,...(st.settings||{})}; S.profile={...DEFAULT_PROFILE,...(st.profile||{})};
   if (st.loc!==undefined) S.loc=st.loc; S.history=st.history||{wear:[],pairs:{}}; if (st.dismissed) S.dismissed=st.dismissed; if (st.taste) S.taste=st.taste; if (st.plan!==undefined) S.plan=st.plan;
   S.saved=st.saved||[]; S.onboarded=true; S.storage.ok=false; closetChanged(); S.feed=null; closeSheet(); render();
-  toast("Your closet loaded, but this phone isn't keeping a copy (storage full or blocked), so it loads from your account each time.");
+  toast("Your closet is shown from your account. This phone couldn't save its own copy, so it downloads again next time.");
 }
 /* ---------- account ---------- */
 async function startAccount(){
@@ -1362,7 +1365,7 @@ async function startAccount(){
 /* after logging in: pick up what's online, or upload this device's closet if the account is new */
 async function signedIn(user,{quiet=false}={}){
   cloud.user=user; be=SB; const first=lsGet(ACCT)!==user.id;
-  let remote=null; try{ remote=await SB.getState(); }catch(e){ cloud.state="error"; cloud.error=String(e.message||e); renderCloud(); return; }
+  let remote=null; try{ remote=await SB.getState(); cloud.remoteN=remote&&remote.items?remote.items.length:0; }catch(e){ cloud.state="error"; cloud.error=String(e.message||e); renderCloud(); return; }
   const localT=+lsGet(LOCALT,0), syncT=+lsGet(SYNCT,0), hasLocal=S.items.length>0;
   const pull=async()=>{ busySheet("Loading your closet…");
     try{ const r=await pullState(remote,SB,setBusy); lsSet(ACCT,user.id);
@@ -1375,7 +1378,7 @@ async function signedIn(user,{quiet=false}={}){
   if (!hasLocal&&remote&&Date.now()-(+lsGet(PULLAT,0))<180000){ lsSet(PULLAT,null); busySheet("Loading your closet…");
     try{ await pullState(remote,SB,setBusy); }catch{} useInMemory(remote); return "pulled"; }
   const push=()=>{ lsSet(ACCT,user.id); cloudPush(); return "pushed"; };
-  if (!remote){ push(); if (!quiet) toast(hasLocal?"Account ready. Uploading your closet…":"Account ready."); return "pushed"; }
+  if (!remote||!(remote.items&&remote.items.length)){ if (hasLocal) push(); else lsSet(ACCT,user.id); if (!quiet) toast(hasLocal?"Account ready. Uploading your closet…":"Account ready."); return "pushed"; }
   if (!hasLocal) return pull();
   if (first){ /* this device has its own closet and the account has one too: ask, never guess */
     const n=remote.items?remote.items.length:0;
