@@ -1,7 +1,7 @@
 /* Daily Fit service worker.
    App files: always the latest from the network when online (so an update shows up on the next open),
    with the saved copy used only when offline or the network is very slow. Libraries and fonts: saved once. */
-const VERSION = "dailyfit-v7.2.1";
+const VERSION = "dailyfit-v7.2.2";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "ai.js", "ai-worker.js", "config.js", "data.js", "color.js", "art.js", "manifest.webmanifest",
   "icon-192.png", "icon-512.png", "maskable-512.png"];
 

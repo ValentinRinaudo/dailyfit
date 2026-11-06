@@ -1327,9 +1327,13 @@ async function pullState(st,src,onStep=()=>{}){
   if (!st||st.app!=="dailyfit") throw new Error("That isn't a Daily Fit backup.");
   const jobs=[]; const add=(rec,fields)=>{ const fm=rec.files||{}; rec.cloudFiles={}; for (const f of fields) if (fm[f]) jobs.push([rec,f,fm[f]]); delete rec.files; };
   st.items.forEach(it=>add(it,ITEM_F)); (st.photos||[]).forEach(p=>add(p,PHOTO_F)); (st.saved||[]).forEach(f=>add(f,["inspoThumb"]));
-  const up=new Set(); let i=0, missing=0;
-  for (const [rec,f,n] of jobs){ onStep(`Downloading photos ${++i} of ${jobs.length}`);
-    try{ rec[f]=await src.getFile(n); rec.cloudFiles[f]={o:null,n}; up.add(n); }catch{ missing++; } }
+  const up=new Set(); let done=0, missing=0, next=0;
+  const limit=(pr,ms)=>Promise.race([pr,new Promise((_,rej)=>setTimeout(()=>rej(new Error("timeout")),ms))]);
+  if (jobs.length) onStep(`Downloading photos 0 of ${jobs.length}`);
+  const worker=async()=>{ while (next<jobs.length){ const [rec,f,n]=jobs[next++];
+    try{ rec[f]=await limit(src.getFile(n),30000); rec.cloudFiles[f]={o:null,n}; up.add(n); }catch{ missing++; }
+    onStep(`Downloading photos ${++done} of ${jobs.length}`); } };
+  await Promise.all(Array.from({length:Math.min(4,jobs.length)},worker));
   onStep("Saving on this device…");
   S.storage.ok=true; await kvClear();
   for (const it of st.items){ await itemPut(it); for (const f of Object.keys(it.cloudFiles)) it.cloudFiles[f].o=(it.files&&it.files[f])||null; await itemPut(it); }
@@ -1339,6 +1343,15 @@ async function pullState(st,src,onStep=()=>{}){
   if (src===SB||src.name==="account") upSave(up); else { const mine=upSet(); up.forEach(n=>mine.add(n)); }
   lsSet(SYNCT,st.t||Date.now()); lsSet(LOCALT,st.t||Date.now());
   return {items:st.items.length, missing};
+}
+/* show a downloaded closet without relying on this phone's storage (used when the phone won't keep it) */
+const PULLAT="dailyfit-pull-at";
+function useInMemory(st){
+  S.items=(st.items||[]).map(i=>({pinned:false,inWash:false,wearCount:0,added:0,warmth:2,form:1,fit:"regular",...i}));
+  S.photos=st.photos||[]; S.settings={...DEFAULT_SETTINGS,...(st.settings||{})}; S.profile={...DEFAULT_PROFILE,...(st.profile||{})};
+  if (st.loc!==undefined) S.loc=st.loc; S.history=st.history||{wear:[],pairs:{}}; if (st.dismissed) S.dismissed=st.dismissed; if (st.taste) S.taste=st.taste; if (st.plan!==undefined) S.plan=st.plan;
+  S.saved=st.saved||[]; S.onboarded=true; S.storage.ok=false; closetChanged(); S.feed=null; closeSheet(); render();
+  toast("Your closet loaded, but this phone isn't keeping a copy (storage full or blocked), so it loads from your account each time.");
 }
 /* ---------- account ---------- */
 async function startAccount(){
@@ -1351,7 +1364,16 @@ async function signedIn(user,{quiet=false}={}){
   cloud.user=user; be=SB; const first=lsGet(ACCT)!==user.id;
   let remote=null; try{ remote=await SB.getState(); }catch(e){ cloud.state="error"; cloud.error=String(e.message||e); renderCloud(); return; }
   const localT=+lsGet(LOCALT,0), syncT=+lsGet(SYNCT,0), hasLocal=S.items.length>0;
-  const pull=async()=>{ busySheet("Loading your closet…"); try{ const r=await pullState(remote,SB,setBusy); lsSet(ACCT,user.id); setBusy(`Loaded ${r.items} pieces${r.missing?` (${r.missing} photos missing)`:""}.`); setTimeout(()=>location.reload(),500); }catch(e){ closeSheet(); toast(String(e.message||e)); } return "pulled"; };
+  const pull=async()=>{ busySheet("Loading your closet…");
+    try{ const r=await pullState(remote,SB,setBusy); lsSet(ACCT,user.id);
+      let kept=0; try{ kept=(await itemsAll()).rows.length; }catch{}
+      if (kept<r.items){ useInMemory(remote); return "pulled"; }   /* this phone didn't keep it: show it anyway, don't reload into a loop */
+      lsSet(PULLAT,Date.now());
+      setBusy(`Loaded ${r.items} pieces${r.missing?` (${r.missing} photos missing)`:""}.`); setTimeout(()=>location.reload(),500); }
+    catch(e){ closeSheet(); toast(String(e.message||e)); } return "pulled"; };
+  /* just downloaded and reloaded, yet the phone has nothing: storage isn't keeping it, so don't download again in a loop */
+  if (!hasLocal&&remote&&Date.now()-(+lsGet(PULLAT,0))<180000){ lsSet(PULLAT,null); busySheet("Loading your closet…");
+    try{ await pullState(remote,SB,setBusy); }catch{} useInMemory(remote); return "pulled"; }
   const push=()=>{ lsSet(ACCT,user.id); cloudPush(); return "pushed"; };
   if (!remote){ push(); if (!quiet) toast(hasLocal?"Account ready. Uploading your closet…":"Account ready."); return "pushed"; }
   if (!hasLocal) return pull();
