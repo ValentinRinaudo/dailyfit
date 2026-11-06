@@ -583,16 +583,10 @@ function toast(m,action){ const t=$("#toast"); t.innerHTML=`<span>${esc(m)}</spa
   if (action) t.querySelector("button").onclick=()=>{ t.hidden=true; action.fn(); }; clearTimeout(toastT); toastT=setTimeout(()=>t.hidden=true,action?6000:2800); }
 const buzz=()=>{ try{ navigator.vibrate&&navigator.vibrate(12); }catch{} };
 function applyTheme(){ const t=S.settings.theme; if (t==="system") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme",t); }
-let sheetBack=null;
-function sheetBackdrop(on){ document.querySelectorAll(".wrap, nav.tabs").forEach(n=>{ if (on) n.setAttribute("inert",""); else n.removeAttribute("inert"); }); }
-function nameSheet(panel){ const h=panel.querySelector("h1,h2,.hero"); if (h){ if (!h.id) h.id="sheetTitle"; panel.setAttribute("aria-labelledby",h.id); panel.removeAttribute("aria-label"); } else { panel.removeAttribute("aria-labelledby"); panel.setAttribute("aria-label","Daily Fit"); } }
-function openSheet(html,{full=false}={}){ const el=$("#sheet"); if (el.hidden) sheetBack=document.activeElement; el.className="sheet"+(full?" full":""); el.innerHTML=`<div class="panel" role="dialog" aria-modal="true" tabindex="-1">${html}</div>`;
+function openSheet(html,{full=false}={}){ const el=$("#sheet"); el.className="sheet"+(full?" full":""); el.innerHTML=`<div class="panel" role="dialog" aria-modal="true">${html}</div>`;
   if (el.hidden&&!(history.state&&history.state.sheet)){ try{ history.pushState({sheet:1},""); }catch{} }
-  el.hidden=false; el.onclick=e=>{ if (e.target===el&&!full) closeSheet(); }; document.body.style.overflow="hidden";
-  const panel=el.firstElementChild; nameSheet(panel); sheetBackdrop(true); try{ panel.focus({preventScroll:true}); }catch{}
-  return panel; }
-function closeSheet(){ const el=$("#sheet"); el.hidden=true; el.innerHTML=""; document.body.style.overflow=""; sheetBackdrop(false);
-  const b=sheetBack; sheetBack=null; if (b&&b.isConnected) try{ b.focus({preventScroll:true}); }catch{} }
+  el.hidden=false; el.onclick=e=>{ if (e.target===el&&!full) closeSheet(); }; document.body.style.overflow="hidden"; return el.firstElementChild; }
+function closeSheet(){ const el=$("#sheet"); el.hidden=true; el.innerHTML=""; document.body.style.overflow=""; }
 function confirmSheet(text,ok,fn){ const p=openSheet(`<h2>${esc(text)}</h2><div class="row"><button type="button" class="btn danger" id="cOk">${esc(ok)}</button><button type="button" class="btn quiet" id="cNo">Cancel</button></div>`);
   p.querySelector("#cOk").onclick=()=>{ closeSheet(); fn(); }; p.querySelector("#cNo").onclick=closeSheet; }
 function busySheet(text){ return openSheet(`<h2 id="busyText">${esc(text)}</h2><div class="skeleton"></div><p class="muted small">Running on your phone, nothing is uploaded.</p>`); }
@@ -604,14 +598,13 @@ const avatarHTML=()=>initials()?esc(initials()):PERSON;
 /* ================= navigation ================= */
 function setTab(t){ if (t==="settings") t="you";
   const go=()=>{ S.tab=t; document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-current",String(b.dataset.tab===t))); try{ history.replaceState(history.state,"","#"+t); }catch{} render(); window.scrollTo(0,0); };
-  if (document.startViewTransition&&!matchMedia("(prefers-reduced-motion: reduce)").matches) { const vt=document.startViewTransition(go); [vt.ready,vt.finished,vt.updateCallbackDone].forEach(x=>x&&x.catch(()=>{})); } else go(); }
+  if (document.startViewTransition&&!matchMedia("(prefers-reduced-motion: reduce)").matches) document.startViewTransition(go); else go(); }
 function render(){
   const v=$("#view");
   $("#dateLabel").textContent=new Date().toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long"});
   $("#avatarBtn").innerHTML=avatarHTML();
   if (!S.ready){ v.innerHTML=`<div class="skeleton"></div>`; return; }
   ({today:renderToday,closet:renderCloset,shop:renderShop,you:renderYou})[S.tab](v);
-  if (!v.querySelector("h1")) v.insertAdjacentHTML("afterbegin",`<h1 class="vh">${({today:"Today",closet:"Your closet",shop:"Shop",you:"You"})[S.tab]||"Daily Fit"}</h1>`);
 }
 
 /* ================= TODAY ================= */
@@ -1111,7 +1104,7 @@ function gapHTML(x,i,R,rc){
   const look=x.best?`<div class="ctl"><span class="label">A fit it makes with your clothes</span><div class="mini">${partsOf(x.best).map(it=>`<div title="${esc(it.name)}">${phHTML(it,{badge:it.virtual?'<span class="badge new">New</span>':""})}</div>`).join("")}</div></div>`:"";
   return `<article class="gap">
     <div class="gap-top"><div class="gap-art">${ex&&ex.img?`<img src="${esc(ex.img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createRange().createContextualFragment(this.dataset.art))" data-art="${esc(ART.svg(x.V,x.V.color))}">`:ART.svg(x.V,x.V.color)}</div>
-      <div class="gap-body"><span class="label">${CATN[g.cat]}${x.trend?` · <span class="trendtag">${x.trend.rising?"Rising now":"Trending"}</span>`:""}</span><h2>${esc(g.name)}</h2>
+      <div class="gap-body"><span class="label">${CATN[g.cat]}${x.trend?` · <span class="trendtag">${x.trend.rising?"Rising now":"Trending"}</span>`:""}</span><h3>${esc(g.name)}</h3>
         ${x.needed?`<p class="metric">You have no ${CATN[g.cat].toLowerCase()} yet</p>`:`<p class="metric"><b>${x.n}</b> new fit${x.n===1?"":"s"}</p><p class="small muted">Works with ${x.partners} of your pieces</p>`}
         ${price?`<p class="small">${esc(price)}</p>`:""}</div></div>
     ${ex?`<a class="seenin" href="${esc(ex.link)}" target="_blank" rel="noopener">Seen in: ${esc(ex.title)} ${IC.ext}</a>`:""}
@@ -1483,7 +1476,6 @@ function onboarding(step=0){
 document.querySelectorAll("nav.tabs button").forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
 $("#addBtn").onclick=()=>addMenu(); $("#avatarBtn").onclick=()=>setTab("you");
 window.addEventListener("online",()=>fetchWeather());
-document.addEventListener("keydown",e=>{ if (e.key!=="Escape"||$("#sheet").hidden) return; e.preventDefault(); if (history.state&&history.state.sheet) history.back(); else closeSheet(); });
 document.addEventListener("visibilitychange",()=>{ if (document.visibilityState==="visible"&&S.ready){ fetchWeather(); if (S.tab==="today"&&$("#sheet").hidden) render(); } });
 window.addEventListener("popstate",()=>{ if (!$("#sheet").hidden){ const wasOb=!S.onboarded; closeSheet(); if (wasOb){ S.onboarded=true; kvSet("onboarded",true); } } });
 render();
