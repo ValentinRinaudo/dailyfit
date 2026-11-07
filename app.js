@@ -124,7 +124,7 @@ function snapshot(){
   try{ localStorage.setItem(SNAP,JSON.stringify({v:1,t:Date.now(),items:S.items.filter(i=>!i.virtual).map(stripItem),photos:S.photos.map(({photo,thumb,emb,...m})=>m),
     settings:S.settings,profile:S.profile,loc:S.loc,history:{wear:S.history.wear.slice(-300),pairs:S.history.pairs},saved:S.saved.map(({inspoThumb,...m})=>m),
     dismissed:S.dismissed,taste:S.taste,plan:S.plan,onboarded:S.onboarded})); }catch{}
-  if (be) cloudSoon();
+  if (be&&(cloud.dirty||+lsGet(LOCALT,0)>+lsGet(SYNCT,0))) cloudSoon();
 }
 const snapSoon=debounce(snapshot,1500);
 function readSnap(){ try{ const j=JSON.parse(localStorage.getItem(SNAP)||"null"); return j&&j.v===1?j:null; }catch{ return null; } }
@@ -1332,6 +1332,10 @@ async function pullState(st,src,onStep=()=>{}){
   st.items.forEach(it=>add(it,ITEM_F)); (st.photos||[]).forEach(p=>add(p,PHOTO_F)); (st.saved||[]).forEach(f=>add(f,["inspoThumb"]));
   const up=new Set(); let done=0, missing=0, next=0;
   const limit=(pr,ms)=>Promise.race([pr,new Promise((_,rej)=>setTimeout(()=>rej(new Error("timeout")),ms))]);
+  /* photos this phone already has under the same online name don't need downloading again */
+  const have=new Map();
+  for (const rec of [...S.items,...S.photos,...S.saved]) for (const [f,c] of Object.entries(rec.cloudFiles||{})) if (c&&c.n&&rec[f] instanceof Blob) have.set(c.n,rec[f]);
+  for (let j=jobs.length-1;j>=0;j--){ const [rec,f,n]=jobs[j]; const b=have.get(n); if (b){ rec[f]=b; rec.cloudFiles[f]={o:null,n}; up.add(n); jobs.splice(j,1); } }
   if (jobs.length) onStep(`Downloading photos 0 of ${jobs.length}`);
   const worker=async()=>{ while (next<jobs.length){ const [rec,f,n]=jobs[next++];
     try{ rec[f]=await limit(src.getFile(n),30000); rec.cloudFiles[f]={o:null,n}; up.add(n); }catch{ missing++; }
